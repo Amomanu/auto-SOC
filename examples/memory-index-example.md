@@ -1,0 +1,17 @@
+- [User identity](user-identity.md) — SOC analyst role and triage context
+- [Client B: CC contact](client-b-cc-contact.md) — add client POC to Client B emails
+- [Jira project location](jira-project-location.md) — Client B project is on your Jira site; use Jira MCP, not client's own site
+- [Harvest time logging](harvest-time-logging.md) — Client B SOC triage time entry mapping
+- [Close Jira = close Sentinel](close-jira-close-sentinel.md) — always close the paired Sentinel incident when a triage ticket is closed in Jira
+- [Client A environment](client-a-environment.md) — Client A Sentinel workspace, browser profile, Investigate-to-Resolve close path
+- [Sentinel comment: paste manually](feedback-sentinel-comment-paste.md) — Sentinel comment box can't be automated; give user text to paste
+- [Graph MCP connected](graph-enterprise-mcp-connected.md) — MS Graph Enterprise MCP live; read-only Entra identity for Client A tenant
+- [KQL in Defender portal](feedback-kql-defender-portal.md) — all KQL runs in Defender (security.microsoft.com), never Sentinel Logs blade
+- [Client A KQL from terminal](client-a-kql-terminal-path.md) — no-browser path: az rest to Log Analytics API
+- [Client B KQL from terminal](client-b-kql-terminal-path.md) — Client B tenant, Sentinel sub, workspace; az rest KQL
+- [Client B Sentinel ingestion map](client-b-sentinel-ingestion-map.md) — Client B workspace ingests SigninLogs/IdentityInfo/SecurityAlert only; email tables EMPTY
+- [Defender AH Monaco technique](defender-ah-monaco-technique.md) — set KQL via monaco setValue + read results via DOM role=row when typing/screenshots flake
+- [Confirm browser first](feedback-confirm-browser-first.md) — multiple Chrome browsers connect; confirm which is the right one before driving
+- [Graph MCP 403: retry, don't escalate](feedback-graph-mcp-retry.md) — on 403, state error once, ask user to re-activate PIM, wait
+- [JSM comments post public by default](jira-jsm-comment-public.md) — Jira MCP addCommentToJiraIssue on JSM posts customer-visible; confirm internal
+- [Ask, don't guess](feedback-ask-dont-guess.md) — unknown identifier? ask; never guess & run

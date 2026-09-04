@@ -26,7 +26,7 @@ examples/
 
 ## How it works
 
-1. **You say** `triage AUT-1234` (or invoke `/triage-ticket`).
+1. **You say** `triage ZETA-4321` (or invoke `/triage-ticket`).
 2. **Claude pulls the ticket** from Jira via the Atlassian MCP.
 3. **Checks Confluence** for a prior decision record on this alert type.
 4. **Confirms the terminal** is logged into the correct Azure tenant.

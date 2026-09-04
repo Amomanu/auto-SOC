@@ -15,12 +15,6 @@ skills/triage-ticket/
     kql-cloudapps.md        # KQL cookbook: MDCA OAuth-app / activity anomaly
     incident-record-template.md  # Confluence IIRR page structure
 
-sentinel-mcp/
-  server.py                 # Python MCP server for Sentinel + Defender + Entra + AIR
-  requirements.txt
-  tenants.json.example      # Multi-tenant config template
-  .env.example
-
 scripts/
   Get-SentinelIncident.ps1  # PowerShell bridge — read a Sentinel incident via az REST
   Setup-ClaudeMcpApp.ps1    # Provision the MS Graph MCP app registration in Entra
@@ -47,7 +41,6 @@ examples/
 - **Atlassian (Jira/Confluence) MCP** — connected in Claude Code
 - **Microsoft MCP Server for Enterprise** — for identity lookups (optional, single-tenant)
 - **Azure CLI** (`az`) — authenticated to each tenant you triage
-- **Python 3.10+** — for the sentinel-mcp server (optional, if using the MCP server instead of `az rest`)
 
 ## Setup
 
@@ -81,19 +74,7 @@ az login --tenant <TENANT_ID>
 az account set --subscription <SUBSCRIPTION_ID>
 ```
 
-### 4. (Optional) Set up the Sentinel MCP server
-
-If you want the MCP server instead of raw `az rest`:
-
-```bash
-cd sentinel-mcp
-cp tenants.json.example tenants.json
-# Fill in your tenant credentials
-pip install -r requirements.txt
-python server.py
-```
-
-### 5. (Optional) Provision the Graph MCP app
+### 4. (Optional) Provision the Graph MCP app
 
 Run `scripts/Setup-ClaudeMcpApp.ps1` in PowerShell as an Entra admin to register the read-only MCP client app.
 

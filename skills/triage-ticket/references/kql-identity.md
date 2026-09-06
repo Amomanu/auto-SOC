@@ -253,7 +253,7 @@ AuditLogs
 - Risk state: `/identityProtection/riskyUsers?$filter=id in ('<ID1>','<ID2>')&$select=id,userDisplayName,riskLevel,riskState,riskDetail`.
 - Baseline the source IP: `/beta/auditLogs/signIns?$filter=userId eq '<ID>'&$select=createdDateTime,appDisplayName,ipAddress,location,riskState,riskLevelDuringSignIn&$orderby=createdDateTime desc` — confirm the registration-time sign-ins are non-risky and from the account's habitual geography.
 
-**Found (CLTA-38623):** two privileged accounts (`gadminuser@` Global Admin, `uadminuser@` User/Groups/
+**Found (CLTA-38623):** two privileged accounts (`upn1@` Global Admin, `upn2@` User/Groups/
 Power Platform Admin) each registered a FIDO2 passkey via Microsoft Authenticator; **every** audit row
 was self-initiated (`initiatedBy.user == target`), from the owner's baseline residential IP,
 risk state `none`/confirmedSafe. Corey also deleted an old iPhone-XS Authenticator + a software-OATH
@@ -266,7 +266,7 @@ token in the same session. → Benign Positive.
 | `union` drops dynamic columns | Referencing `LocationDetails` / `DeviceDetail` after `union SigninLogs, AADNonInteractiveUserSignInLogs` → *"Failed to resolve scalar expression"* / `SEM0139` | Query `SigninLogs` alone for device/location, or `extend` / `project` the fields inside each table before unioning |
 | `LocationDetails` is a **string** in `AADNonInteractiveUserSignInLogs` | `tostring(LocationDetails.countryOrRegion)` on that table → `SEM0070 … source must be scalar of type 'dynamic'` | `extend L = parse_json(LocationDetails)` first, then `tostring(L.countryOrRegion)` — the non-interactive table stores it as a JSON string, not a dynamic |
 | MFA sub-status misread as access | `userPassedMFADrivenByRiskBasedPolicy` read as "logged in" | Read the final `ResultType`; a non-zero result (e.g. `70045`) means no token was issued despite the MFA pass |
-| `has` misses substrings in a UPN | `Actor has "smith"` returns **zero rows** — `has` matches whole tokens, and `jsmith@…` tokenises to `jsmith`/`domain`/`com` | Use `contains` for partial matches inside UPNs/emails; reserve `has` for whole-word matches (e.g. a display name in `TargetResources`) |
+| `has` misses substrings in a UPN | `Actor has "pn1"` returns **zero rows** — `has` matches whole tokens, and `upn1@…` tokenises to `upn1`/`domain`/`com` | Use `contains` for partial matches inside UPNs/emails; reserve `has` for whole-word matches (e.g. a display name in `TargetResources`) |
 | `OperationName` truncates | Truncated column can't distinguish a PIM activation from a permanent assignment | `summarize count() by OperationName` on its own so it renders full width |
 | Role name not in `modifiedProperties` | PIM role events carry only `TemplateId` / `RoleDefinitionOriginId` / `RoleDefinitionOriginType` | Expand `TargetResources`, read the entry where `type == "Role"`; resolve template GUIDs from the data, never from memory |
 | `InitiatedBy` needs double conversion | `InitiatedBy.user.userPrincipalName` may not resolve | `tostring(parse_json(tostring(InitiatedBy)).user.userPrincipalName)` |

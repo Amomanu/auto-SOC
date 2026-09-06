@@ -1,12 +1,23 @@
 # Agentic SOC Triage
 
-An end-to-end SOC alert triage system built on [Claude Code](https://claude.com/claude-code). It pulls a Sentinel alert from Jira, investigates it via KQL and Microsoft Graph, reaches an evidence-backed disposition, and writes the decision record back to Jira + Confluence — all from the terminal.
+An agentic, end-to-end SOC alert triage system built on [Claude](https://claude.ai). The agent autonomously pulls a Sentinel alert from Jira, investigates it via KQL and Microsoft Graph, reaches an evidence-backed disposition, closes the Sentinel incident, and writes the full decision record back to Jira + Confluence — no human in the loop unless containment is needed.
+
+## Version
+
+**v0.2.0** — 2026-09-06
+
+### Changelog
+
+| Version | Date | What changed |
+|---------|------|--------------|
+| **v0.2.0** | 2026-09-06 | Bidirectional Inkbox iMessage bridge (agent sends + receives approval via iMessage); autonomous triage guardrails (auto-approve investigation, Jira, Confluence, Sentinel close — only containment needs human approval); Sentinel close via terminal (`PUT` with etag, not PATCH); IIRR update-only-when-new rule; KQL cookbook rewrites (cloud apps, email, endpoint, AWS, identity) with new gotchas, pitfall tables, and real-case examples |
+| **v0.1.0** | 2026-09-04 | Initial publish — triage skill, KQL cookbooks, incident record template, Graph MCP setup, PowerShell scripts |
 
 ## What's here
 
 ```
 skills/triage-ticket/
-  SKILL.md                  # The triage skill — Claude Code reads this to run a triage
+  SKILL.md                  # The triage skill — the agent reads this to run an autonomous triage
   references/
     kql-identity.md         # KQL cookbook: Entra sign-in / brute-force / spray / PIM
     kql-email.md            # KQL cookbook: MDO post-delivery / ZAP email detections
@@ -20,34 +31,36 @@ scripts/
   Setup-ClaudeMcpApp.ps1    # Provision the MS Graph MCP app registration in Entra
 
 examples/
-  settings.json.example     # Claude Code user settings reference
+  settings.json.example     # Claude user settings reference
   memory-index-example.md   # Example MEMORY.md index for the auto-memory system
 ```
 
 ## How it works
 
 1. **You say** `triage ZETA-4321` (or invoke `/triage-ticket`).
-2. **Agent pulls the ticket** from Jira via the Atlassian MCP.
-3. **Checks Confluence** for a prior decision record on this alert type.
+2. **The agent pulls the ticket** from Jira via the Atlassian MCP.
+3. **Checks Confluence** for a prior decision record on this alert type — reuses the playbook and checks the case ledger for consistency.
 4. **Confirms the terminal** is logged into the correct Azure tenant.
 5. **Runs KQL** via `az rest` against the Log Analytics workspace — sign-in logs, Defender tables, CloudTrail, whatever the detection needs.
 6. **For identity lookups on Client A**, uses the MS Graph Enterprise MCP (read-only Entra connector).
 7. **Reaches a disposition** — True Positive, False Positive, Benign Positive, or Awaiting Confirmation.
-8. **Writes the Jira comment** (verdict + evidence), transitions the ticket, and creates/updates the Confluence IIRR page.
+8. **Writes the Jira comment** (verdict + evidence), transitions the ticket, closes the Sentinel incident, and creates/updates the Confluence IIRR page.
+9. **On True Positive with containment needed** — sends an iMessage via Inkbox, waits for analyst approval, then executes.
 
 ## Prerequisites
 
-- **Claude Code** (desktop app or CLI)
-- **Atlassian (Jira/Confluence) MCP** — connected in Claude Code
+- **Claude** (desktop app, CLI, or SDK)
+- **Atlassian (Jira/Confluence) MCP** — connected as a tool provider
 - **Microsoft MCP Server for Enterprise** — for identity lookups (optional, single-tenant)
 - **Azure CLI** (`az`) — authenticated to each tenant you triage
-- **Log Analytics** - data to query
+- **Log Analytics** — data to query
+- **Inkbox AI** (optional) — for bidirectional iMessage notifications
 
 ## Setup
 
 ### 1. Install the triage skill
 
-Copy `skills/triage-ticket/` (with its `references/` folder) into your Claude Code skills directory:
+Copy `skills/triage-ticket/` (with its `references/` folder) into your Claude skills directory:
 
 ```bash
 # User-level skill (available in all projects)

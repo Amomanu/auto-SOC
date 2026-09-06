@@ -27,7 +27,7 @@ examples/
 ## How it works
 
 1. **You say** `triage ZETA-4321` (or invoke `/triage-ticket`).
-2. **Claude pulls the ticket** from Jira via the Atlassian MCP.
+2. **Agent pulls the ticket** from Jira via the Atlassian MCP.
 3. **Checks Confluence** for a prior decision record on this alert type.
 4. **Confirms the terminal** is logged into the correct Azure tenant.
 5. **Runs KQL** via `az rest` against the Log Analytics workspace — sign-in logs, Defender tables, CloudTrail, whatever the detection needs.
@@ -41,6 +41,7 @@ examples/
 - **Atlassian (Jira/Confluence) MCP** — connected in Claude Code
 - **Microsoft MCP Server for Enterprise** — for identity lookups (optional, single-tenant)
 - **Azure CLI** (`az`) — authenticated to each tenant you triage
+- **Log Analytics - data to query
 
 ## Setup
 

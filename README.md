@@ -1,4 +1,4 @@
-# Claude SOC Triage
+# Agentic SOC Triage
 
 An end-to-end SOC alert triage system built on [Claude Code](https://claude.com/claude-code). It pulls a Sentinel alert from Jira, investigates it via KQL and Microsoft Graph, reaches an evidence-backed disposition, and writes the decision record back to Jira + Confluence — all from the terminal.
 

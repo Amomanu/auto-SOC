@@ -90,7 +90,7 @@ SigninLogs
     by IPAddress, Loc, OS, Br, Trust
 | order by Count desc
 ```
-Compare the IPv6 **`/64`** (e.g. `2603:3003:xxxx:xxxx::/64`), not the full address — privacy
+Compare the IPv6 **`/64`** (e.g. `2603:3003:1db7:8100::/64`), not the full address — privacy
 addressing rotates the host portion on the same subscriber line, so a "new" address in a known
 `/64` is normally the same machine.
 
@@ -211,12 +211,12 @@ AuditLogs
 | project TimeGenerated, OperationName, Result, Actor, ActorApp, ActorIP, TUPN, TName, TId
 | order by TimeGenerated asc
 ```
-`ActorApp` names a non-human initiator — a sanctioned HR/IGA SCIM connector creating a duplicate
-on a UPN collision is the benign shape. The **disconfirming test for this family** is whether the
-*deleted* object ever authenticated: run the sign-in-burst query above keyed on the display-name
-token and confirm the deleted UPN has **zero** sign-ins (an adversary provisions a throwaway account
-to use it). A `0`-result success on the deleted object from an unfamiliar source flips the case to
-escalation.
+`ActorApp` names a non-human initiator — a sanctioned HR/IGA SCIM connector (e.g. **Aquera**)
+creating a duplicate on a UPN collision is the benign shape. The **disconfirming test for this
+family** is whether the *deleted* object ever authenticated: run the sign-in-burst query above keyed
+on the display-name token and confirm the deleted UPN has **zero** sign-ins (an adversary provisions a
+throwaway account to use it). A `0`-result success on the deleted object from an unfamiliar source
+flips the case to escalation.
 
 ### Authentication-method / security-info changes (privileged-account persistence alerts)
 
@@ -227,12 +227,12 @@ decisive cut is **who initiated the change and from where**: a self-service enro
 owner from a baseline IP is benign; an admin-initiated reset, a foreign/hosting-IP registration, or a
 change on the heels of a risky sign-in is persistence.
 
-On **Client A**, pull these through the MS Graph Enterprise MCP (directory-audit identity info), not
+On **CLTA**, pull these through the MS Graph Enterprise MCP (directory-audit identity info), not
 Defender AH. `microsoft_graph_suggest_queries` first, then:
 ```
 /v1.0/auditLogs/directoryAudits?$filter=(loggedByService eq 'Authentication Methods' or loggedByService eq 'Azure MFA' or loggedByService eq 'Device Registration Service') and targetResources/any(tr:tr/id eq '<USER_OBJECT_ID>')&$select=id,activityDisplayName,loggedByService,result,initiatedBy,targetResources,activityDateTime&$orderBy=activityDateTime desc&$top=20
 ```
-For non-Client A clients the same data is in `AuditLogs`:
+For non-CLTA clients the same data is in `AuditLogs`:
 ```kusto
 AuditLogs
 | where TimeGenerated > ago(14d)
@@ -253,6 +253,12 @@ AuditLogs
 - Risk state: `/identityProtection/riskyUsers?$filter=id in ('<ID1>','<ID2>')&$select=id,userDisplayName,riskLevel,riskState,riskDetail`.
 - Baseline the source IP: `/beta/auditLogs/signIns?$filter=userId eq '<ID>'&$select=createdDateTime,appDisplayName,ipAddress,location,riskState,riskLevelDuringSignIn&$orderby=createdDateTime desc` — confirm the registration-time sign-ins are non-risky and from the account's habitual geography.
 
+**Found (CLTA-38623):** two privileged accounts (`upn1@` Global Admin, `upn2@` User/Groups/
+Power Platform Admin) each registered a FIDO2 passkey via Microsoft Authenticator; **every** audit row
+was self-initiated (`initiatedBy.user == target`), from the owner's baseline residential IP,
+risk state `none`/confirmedSafe. Corey also deleted an old iPhone-XS Authenticator + a software-OATH
+token in the same session. → Benign Positive.
+
 ## Traps (identity-specific)
 
 | Trap | Symptom | Workaround |
@@ -260,7 +266,7 @@ AuditLogs
 | `union` drops dynamic columns | Referencing `LocationDetails` / `DeviceDetail` after `union SigninLogs, AADNonInteractiveUserSignInLogs` → *"Failed to resolve scalar expression"* / `SEM0139` | Query `SigninLogs` alone for device/location, or `extend` / `project` the fields inside each table before unioning |
 | `LocationDetails` is a **string** in `AADNonInteractiveUserSignInLogs` | `tostring(LocationDetails.countryOrRegion)` on that table → `SEM0070 … source must be scalar of type 'dynamic'` | `extend L = parse_json(LocationDetails)` first, then `tostring(L.countryOrRegion)` — the non-interactive table stores it as a JSON string, not a dynamic |
 | MFA sub-status misread as access | `userPassedMFADrivenByRiskBasedPolicy` read as "logged in" | Read the final `ResultType`; a non-zero result (e.g. `70045`) means no token was issued despite the MFA pass |
-| `has` misses substrings in a UPN | `Actor has "smith"` returns **zero rows** — `has` matches whole tokens, and `jsmith@…` tokenises to `jsmith`/`domain`/`com` | Use `contains` for partial matches inside UPNs/emails; reserve `has` for whole-word matches (e.g. a display name in `TargetResources`) |
+| `has` misses substrings in a UPN | `Actor has "pn1"` returns **zero rows** — `has` matches whole tokens, and `upn1@…` tokenises to `upn1`/`domain`/`com` | Use `contains` for partial matches inside UPNs/emails; reserve `has` for whole-word matches (e.g. a display name in `TargetResources`) |
 | `OperationName` truncates | Truncated column can't distinguish a PIM activation from a permanent assignment | `summarize count() by OperationName` on its own so it renders full width |
 | Role name not in `modifiedProperties` | PIM role events carry only `TemplateId` / `RoleDefinitionOriginId` / `RoleDefinitionOriginType` | Expand `TargetResources`, read the entry where `type == "Role"`; resolve template GUIDs from the data, never from memory |
 | `InitiatedBy` needs double conversion | `InitiatedBy.user.userPrincipalName` may not resolve | `tostring(parse_json(tostring(InitiatedBy)).user.userPrincipalName)` |
@@ -291,7 +297,7 @@ out regardless of volume.
 | `50133` | Session expired/invalid | Token | May indicate attack disruption revoked the session |
 | `50173` | Token expired/malformed | Token | May indicate token revocation by attack disruption |
 | `70043` | Refresh token expired | Token | Background refresh aged out. Not a credential event |
-| `70045` | Refresh token invalid — CA sign-in-frequency | Token | Refresh-token replay rejected at issuance; **no session granted**, and the token is now dead ("will never be usable"). Seen on TOR/anonymized-IP token replay |
+| `70045` | Refresh token invalid — CA sign-in-frequency | Token | Refresh-token replay rejected at issuance; **no session granted**, and the token is now dead ("will never be usable"). Seen on TOR/anonymized-IP token replay (CLTB-5524) |
 | `500111` | Reply URI has invalid scheme | Config | OAuth redirect rejected before any credential check. App misconfiguration |
 | `700016` | Application not found in directory | Config | App registration / consent problem. Not a credential event |
 
@@ -299,7 +305,7 @@ out regardless of volume.
 `userPassedMFADrivenByRiskBasedPolicy` (with `RiskState=remediated`) means the **MFA step passed** — but
 if the row's `ResultType` is non-zero (e.g. `70045`), the sign-in **still failed at a later gate and no
 token was issued**. Read the final `ResultType`, not the MFA sub-status: a passed MFA on a failed sign-in
-is a *near-miss* (contain), not access.
+is a *near-miss* (contain), not access (CLTB-5524).
 
 ## Reusable classification logic (sign-in / failed-logon type)
 
@@ -329,5 +335,5 @@ comes from an **unfamiliar / hosting / foreign** IP; it follows risky sign-ins o
 from an unfamiliar source; or the account is `atRisk`/`confirmedCompromised`.
 
 > This rule measures *change*, not intrusion. Read the initiator and the source IP before the volume:
-> a privileged user re-enrolling MFA on a new phone from home is the common benign shape, and the
-> My-Sign-Ins service IP on a self-service row is not a second actor.
+> a privileged user re-enrolling MFA on a new phone from home is the common benign shape (CLTA-38623),
+> and the My-Sign-Ins service IP on a self-service row is not a second actor.

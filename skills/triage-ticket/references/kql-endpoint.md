@@ -1,192 +1,207 @@
-# KQL — Endpoint LOLBin / Defender-exclusion detections (`kql-endpoint.md`)
+# KQL cookbook — Endpoint / Defender-XDR LOLBin behavior (image loads, process, network)
 
-For Sentinel rules sourced from Microsoft Defender for Endpoint: LOLBin execution
-(regsvr32, rundll32, mshta, certutil, etc.), Defender AV exclusion tampering, suspicious
-process chains, and device anomaly alerts. Core tables: `DeviceProcessEvents`,
-`DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceNetworkEvents`, `DeviceImageLoadEvents`,
-`SecurityAlert`. Some tables live in **Defender Advanced Hunting** only (check the ingestion
-map), while `SecurityAlert` is in the Sentinel workspace.
+Covers Sentinel scheduled-analytics and Defender/XDR detections that fire on **endpoint
+process behavior** — e.g. "Regsvr32 Rundll32 Image Loads Abnormal Extension", suspicious
+LOLBin execution, unusual DLL/image loads, script-host spawns. Source telemetry is the
+**MDE device tables**, which in this tenant are streamed into the Log Analytics workspace
+(`<CLTA_WORKSPACE_NAME>`) and queryable via terminal `az rest` (see SKILL.md §0 for workspace IDs and
+the `az rest` pattern).
 
-> Universal KQL conventions (validate every zero-row negative, `ago()`-scope-then-narrow, KQL mode,
-> terminal KQL conventions) live in the skill body. This file carries only the endpoint-family
-> patterns, traps, and reference tables.
+Core tables:
+- `DeviceImageLoadEvents` — DLL/image loads (FileName, FolderPath, SHA1/SHA256, InitiatingProcess*)
+- `DeviceProcessEvents` — process creation + full command lines, parent process, account
+- `DeviceNetworkEvents` — outbound/inbound connections (RemoteIP, RemotePort, RemoteUrl, InitiatingProcess*)
+- `DeviceFileCertificateInfo` — Authenticode signer/issuer for a SHA1 (signature validation)
+- `SecurityAlert` — cross-product alert sweep for a host
 
-## Detection family 1: LOLBin image loads (regsvr32 / rundll32 / mshta)
+## Account/host resolution first
+- The alert entity is a **device name** (e.g. `tosj0gpdc4`), not a UPN. Key every query on
+  `DeviceName has "<host>"`.
+- Portal alert Start/End times are **UTC** in the Logs "Link to LA" context — confirmed by the
+  rule's own `set query_now = datetime(...Z)`. But the incident **Overview** card shows local
+  (EDT). Don't mix them; prefer `ago()` windows over fixed timestamps.
 
-### What the rule detects
-Execution of living-off-the-land binaries that can proxy DLL loads or script execution.
-The rule fires on the **image load** or **process creation** event, not on the outcome.
-The decisive question is: *what did it load, and was it expected?*
+## Query patterns
 
-### Characterise the process chain
-```kusto
-DeviceProcessEvents
-| where TimeGenerated > ago(3d)
-| where DeviceName has "<host>"
-| where FileName has_any ("regsvr32.exe", "rundll32.exe", "mshta.exe", "certutil.exe")
-| project TimeGenerated, DeviceName, FileName,
-    ProcessCommandLine, InitiatingProcessFileName,
-    InitiatingProcessCommandLine, AccountName,
-    FolderPath, ProcessId, InitiatingProcessId
-| order by TimeGenerated asc
+### 1. Reproduce the exact rule match (image-load detections)
 ```
-
-### Image loads by the LOLBin process
-```kusto
 DeviceImageLoadEvents
-| where TimeGenerated > ago(3d)
+| where Timestamp > ago(3d)
 | where DeviceName has "<host>"
-| where InitiatingProcessFileName has_any ("regsvr32.exe", "rundll32.exe")
-| project TimeGenerated, FileName, FolderPath,
-    SHA256, InitiatingProcessCommandLine,
-    InitiatingProcessFolderPath
-| order by TimeGenerated asc
+| where InitiatingProcessFileName =~ "regsvr32.exe" or InitiatingProcessFileName =~ "rundll32.exe"
+| where FileName !endswith ".dll"
+| project Timestamp, DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName,
+          InitiatingProcessParentFileName, InitiatingProcessCommandLine, FileName, FolderPath, SHA1
+| take 50
 ```
 
-### Network connections from the LOLBin
-```kusto
+### 2. Characterise the burst — is it one transaction?
+Group the .tmp/.abnormal loads by initiating/parent process and account. A tight burst
+(seconds) all parented by `msiexec.exe` under `system` = an install/patch transaction.
+
+### 3. Disconfirming test — the network half
+The rule "joins to public network events." Pull the flagged RemoteIP and see **which process**
+made it and to **what URL**:
+```
 DeviceNetworkEvents
-| where TimeGenerated > ago(3d)
+| where Timestamp > ago(3d)
 | where DeviceName has "<host>"
-| where InitiatingProcessFileName has_any ("regsvr32.exe", "rundll32.exe", "mshta.exe")
-| project TimeGenerated, RemoteIP, RemotePort, RemoteUrl,
-    InitiatingProcessFileName, InitiatingProcessCommandLine
-| order by TimeGenerated asc
+| where RemoteIP == "<flagged IP>"
+| project Timestamp, DeviceName, InitiatingProcessAccountName, InitiatingProcessFileName,
+          RemoteIP, RemotePort, RemoteUrl, InitiatingProcessParentFileName
+| take 50
 ```
+If **multiple unrelated processes** (and multiple user accounts) hit the same IP on **:80** with
+a `RemoteUrl` of `http://ocsp.<ca>.com/...`, it is a shared **OCSP certificate-revocation
+endpoint**, not a per-process C2 channel.
 
-### File writes by the process
-```kusto
-DeviceFileEvents
-| where TimeGenerated > ago(3d)
-| where DeviceName has "<host>"
-| where InitiatingProcessFileName has_any ("regsvr32.exe", "rundll32.exe")
-| where ActionType has_any ("FileCreated", "FileModified")
-| project TimeGenerated, FileName, FolderPath, SHA256,
-    InitiatingProcessFileName, InitiatingProcessCommandLine
-| order by TimeGenerated asc
+### 4. Host-scoped alert sweep (breadth)
 ```
-
-### Baseline: is this LOLBin normal on this host?
-```kusto
-DeviceProcessEvents
-| where TimeGenerated > ago(30d)
-| where DeviceName has "<host>"
-| where FileName has "<lolbin>"
-| summarize Count=count(), First=min(TimeGenerated), Last=max(TimeGenerated),
-    DistinctCmdLines=dcount(ProcessCommandLine)
-    by FileName, InitiatingProcessFileName
-| order by Count desc
-```
-
-## Detection family 2: Defender AV exclusion tampering
-
-### What the rule detects
-A registry or policy change that adds, modifies, or removes a Defender AV exclusion
-(path, extension, or process). The exclusion change itself is the event — the question is
-*who made it and why*.
-
-### Registry exclusion changes
-```kusto
-DeviceRegistryEvents
-| where TimeGenerated > ago(3d)
-| where DeviceName has "<host>"
-| where RegistryKey has "Windows Defender" and RegistryKey has "Exclusions"
-| project TimeGenerated, DeviceName, ActionType,
-    RegistryKey, RegistryValueName, RegistryValueData,
-    InitiatingProcessFileName, InitiatingProcessCommandLine,
-    InitiatingProcessAccountName
-| order by TimeGenerated asc
-```
-
-### Who set the exclusion — process chain
-```kusto
-DeviceProcessEvents
-| where TimeGenerated > ago(3d)
-| where DeviceName has "<host>"
-| where ProcessCommandLine has "Exclusion"
-    or ProcessCommandLine has "Add-MpPreference"
-    or ProcessCommandLine has "Set-MpPreference"
-| project TimeGenerated, FileName, ProcessCommandLine,
-    InitiatingProcessFileName, InitiatingProcessCommandLine,
-    AccountName, AccountDomain
-| order by TimeGenerated asc
-```
-
-### Exclusion breadth — what is now excluded?
-```kusto
-DeviceRegistryEvents
-| where TimeGenerated > ago(30d)
-| where DeviceName has "<host>"
-| where RegistryKey has "Windows Defender" and RegistryKey has "Exclusions"
-| summarize Count=count(), Last=max(TimeGenerated)
-    by RegistryKey, RegistryValueName, RegistryValueData, ActionType
-| order by Last desc
-```
-
-### Correlated malware — did anything run from the excluded path?
-```kusto
-DeviceProcessEvents
-| where TimeGenerated > ago(3d)
-| where DeviceName has "<host>"
-| where FolderPath has "<excluded_path>"
-| project TimeGenerated, FileName, FolderPath, SHA256,
-    ProcessCommandLine, InitiatingProcessFileName, AccountName
-| order by TimeGenerated asc
-```
-
-### Tenant-wide exclusion sweep
-Check if the same exclusion was pushed to multiple devices (GPO or Intune deployment vs.
-local tampering).
-```kusto
-DeviceRegistryEvents
+SecurityAlert
 | where TimeGenerated > ago(7d)
-| where RegistryKey has "Windows Defender" and RegistryKey has "Exclusions"
-| where RegistryValueData has "<excluded_value>"
-| summarize Devices=dcount(DeviceName), Count=count()
-    by RegistryValueName, RegistryValueData, ActionType
+| where Entities has "<host>"
+| project TimeGenerated, AlertName, AlertSeverity, Status, ProductName
+| take 50
 ```
 
-## Traps (endpoint-specific)
+## Traps
+- **Scope by `ago()` in every query.** A narrow default time window can cause a host-scoped
+  `SecurityAlert` / 7-day query to return zero rows even though data exists. Always use explicit
+  `ago(7d)` or wider scopes. Validate the zero by confirming the query returns the incident's
+  **own** alert.
+- **Avoid `count()` / `in (...)` when constructing KQL for terminal** — prefer OR'd `=~` equalities
+  and `take`/`distinct` to reduce escaping issues. Read the query back before running.
+- **`.tmp` in `C:\Windows\Installer\` loaded by rundll32 is not "masquerading."** It is the
+  WiX/DTF pattern (see below). Read the command line before assessing.
 
-| Trap | Symptom | Workaround |
-|------|---------|------------|
-| Tables not in Sentinel | `DeviceProcessEvents` returns zero in Log Analytics | Check ingestion map — these tables may live in Defender AH only |
-| LOLBin ≠ malware | regsvr32/rundll32 are legitimate Windows components used constantly | Baseline the host first; the DLL it loaded and the parent process are what matter |
-| GPO-deployed exclusions | Exclusion change fires on every device in the OU | Check breadth — if 50 devices got the same exclusion at the same time, it's policy |
-| `ProcessCommandLine` truncation | Long command lines are clipped in the table | Use `has` rather than exact match; for full command lines, check the process tree |
-| Hash mismatch across tables | SHA256 in `DeviceFileEvents` vs `DeviceImageLoadEvents` may differ for the same file | Side-loaded DLLs may be modified between write and load; compare both |
-| Defender AV itself as initiator | `InitiatingProcessFileName == "MsMpEng.exe"` | Defender scanning or remediating triggers process/file events — not an attacker |
-| Timestamped event vs. alert time | Alert may fire hours after the event if detection is delayed | Always check the event's `TimeGenerated`, not just the alert timestamp |
+## Classification logic — regsvr32/rundll32 abnormal-extension image loads
+The **benign/WiX signature** (→ False Positive, tune):
+- Command line: `rundll32.exe "C:\Windows\Installer\<MSIxxxx>.tmp",zzzzInvokeManagedCustomActionOutOfProc SfxCA_...`
+- `SfxCA_*` + `zzzzInvokeManagedCustomActionOutOfProc` = WiX toolset **managed custom-action host**.
+  msiexec extracts the self-extracting CA DLL into `C:\Windows\Installer` as a `.tmp` and invokes
+  it via rundll32. The `.tmp` **is** a DLL; the extension is installer naming, not evasion.
+- Account `system`, parent `msiexec.exe`, tight burst = MSI install/patch (incl. Azure VM
+  extension updates, which install via msiexec as SYSTEM).
+- Any joined public-network connection is typically the installer's **OCSP signature check**
+  (`http://ocsp.digicert.com`, :80).
+- Verdict: **False Positive — overbroad rule misfires on WiX MSI custom actions.** Recommend a
+  rule exclusion for `FolderPath startswith "C:\\Windows\\Installer\\"` + `FileName endswith ".tmp"`
+  + `InitiatingProcessParentFileName =~ "msiexec.exe"` + command line contains
+  `zzzzInvokeManagedCustomActionOutOfProc`.
 
-## Reusable classification logic
+The **would-be-malicious** shape (→ escalate): rundll32/regsvr32 loading an odd-extension image
+from a **user-writable / temp / web-download path**, parented by a browser/office/script host,
+running as a **user** (not SYSTEM/msiexec), with a **beaconing** egress to a non-CA IP. None of
+this was present here.
 
-### LOLBin type
+---
 
-**Lean benign positive when:** the loaded DLL is a known, signed Microsoft or vendor
-component; the parent process is a legitimate installer, update service, or management
-tool (SCCM, Intune, GPO); the command line matches a known software deployment pattern;
-the LOLBin execution has a 30-day baseline on this host with the same parent; no network
-connections to external IPs; no file writes to user-writable paths.
+## Detection family — Windows Defender exclusion tamper ("Malware Hides Itself Among Windows Defender Exclusions", MosaicLoader)
 
-**Escalate when:** the loaded DLL is unsigned, in a temp/user-writable path, or has a
-suspicious name; the parent process is unusual (explorer.exe → cmd.exe → regsvr32.exe);
-network connections go to external IPs (especially on non-standard ports); the command
-line contains encoded content, URL references, or suspicious flags (`/s /u /i:http`);
-no baseline exists for this LOLBin on this host; file writes to startup/persistence
-locations follow.
+Sentinel scheduled rule that fires on **any write to the Defender Exclusions registry keys**. Source
+table `DeviceRegistryEvents`. The rule (as shipped) keys purely on the registry key path and does
+**not** inspect who wrote it or what was excluded — so it fires on legitimate exclusion registration
+just as readily as on malware. Kill-chain tag is always **DefenseEvasion** (the rule's inherent tag,
+not observed adversary behavior). Alert entity is a **device name**, not a UPN.
 
-### Defender exclusion tamper type
+The exact shipped rule logic:
+```
+DeviceRegistryEvents
+| where ActionType == "RegistryValueSet"
+    and (RegistryKey startswith @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths"
+      or RegistryKey startswith @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender\Exclusions\Extensions"
+      or RegistryKey startswith @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes")
+```
+The excluded item is the **`RegistryValueName`** (e.g. a full exe path or an extension); `RegistryValueData`
+is a Dword `0`. `Exclusions\Paths` = folder/path exclusion, `\Processes` = process exclusion,
+`\Extensions` = file-extension exclusion.
 
-**Lean benign positive when:** the exclusion was set by a management tool (SCCM, Intune,
-GPO) or a known software installer; the excluded path is a legitimate application directory;
-the same exclusion appears across many devices simultaneously (policy deployment); the
-initiating account is a domain admin or system account performing a documented change.
+### Query patterns
 
-**Escalate when:** the exclusion was set by a user-context process or script; the excluded
-path is `C:\Users\*`, `%TEMP%`, `%APPDATA%`, or another user-writable location; a process
-subsequently ran from the excluded path; the exclusion targets a file extension commonly
-abused (`.exe`, `.dll`, `.ps1`, `.bat`); the initiating process chain is suspicious
-(powershell → Add-MpPreference); the change is isolated to a single device (not GPO).
+**1. Reproduce the match + read WHO wrote it and WHAT was excluded** (the crux). Get the full row:
+```
+DeviceRegistryEvents
+| where DeviceName has "<host>"
+| where RegistryKey startswith @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender\Exclusions"
+| where Timestamp between (datetime(<alert-min-Z>) .. datetime(<alert-max-Z>))
+| project Timestamp, RegistryKey, RegistryValueName, RegistryValueData, ActionType,
+          InitiatingProcessFileName, InitiatingProcessFolderPath, InitiatingProcessAccountName,
+          PreviousRegistryValueName
+| sort by Timestamp asc
+```
+Read `InitiatingProcessFileName`/`FolderPath` and the VersionInfo (CompanyName, FileDescription):
+- **`msmpeng.exe`** from `…\Windows Defender\Platform\<ver>\MsMpEng.exe`, account `system`, CompanyName
+  **Microsoft Corporation**, FileDescription **Antimalware Service Executable** = the exclusion was applied
+  through the **proper Defender channel** (admin, Intune/MDE/GPO policy, Windows Security UI, an app
+  installer's Add-MpPreference, or a Defender platform-update re-commit). Defender itself commits the value.
+- `PreviousRegistryValueName == RegistryValueName` = the exclusion **already existed** and was re-written
+  unchanged (policy sync / platform update re-commit), not freshly injected.
 
-> Exclusion alerts measure *configuration change*, not malware. The tamper is only meaningful
-> if something exploits the gap it creates — always check what ran from the excluded path.
+**2. Was the exclusion long-standing or newly injected?** (history)
+```
+DeviceRegistryEvents
+| where DeviceName has "<host>"
+| where RegistryKey has @"Windows Defender\Exclusions"
+| where Timestamp > ago(90d)
+| summarize FirstSeen=min(Timestamp), LastSeen=max(Timestamp), Writes=count()
+    by RegistryValueName, InitiatingProcessFileName, ActionType
+| sort by RegistryValueName asc
+```
+
+**3. Is the excluded target a real, legitimately-used app?** (disconfirming)
+```
+DeviceProcessEvents
+| where DeviceName has "<host>"
+| where Timestamp > ago(30d)
+| where FolderPath has "<excluded-app-dir>" or FileName startswith "<excluded-app>"
+| summarize Runs=count(), FirstSeen=min(Timestamp), LastSeen=max(Timestamp)
+    by FileName, FolderPath, InitiatingProcessAccountName
+| sort by LastSeen desc
+```
+Real end users running the app from its **standard `C:\Program Files\<vendor>\` path** — and an
+**installer/setup** running from a user Downloads dir near the alert time — confirms a legit
+install/update that registered the vendor's own Defender exclusions.
+
+**4. Any actual malware on the host?** (breadth — must accompany any FP call)
+```
+DeviceEvents
+| where DeviceName has "<host>"
+| where Timestamp > ago(14d)
+| where ActionType has_any ("Antivirus","Malware","Quarantine","Amsi","Asr","ExploitGuard","SmartScreen")
+| summarize Count=count(), Last=max(Timestamp) by ActionType
+```
+**Validate the zero** with the companion (proves the table is populated for the host):
+```
+DeviceEvents | where DeviceName has "<host>" | where Timestamp > ago(14d)
+| summarize Count=count(), Last=max(Timestamp) by ActionType | sort by Count desc | take 20
+```
+
+### Traps
+- **The alert entity resolves the host but the two "extra" alert entities show as `0`** — those are the
+  excluded-path registry entities that didn't resolve to named entities. Not evidence of anything.
+- **`RegistryValueData` is always `0`** for a Defender exclusion — it is not a payload; ignore it. The
+  signal is the `RegistryValueName` (the excluded path/extension) and the initiating process.
+- The incident **Entities**/**Top insights** cards in the new Azure incident page frequently render
+  "Something went wrong" — use the alert flyout's **Events → Link to LA** to get the exact rule query and
+  matched rows instead.
+
+### Classification logic — Defender exclusion tamper
+The **benign/legit-software signature** (→ False Positive, tune):
+- Initiating process **`MsMpEng.exe`** (Microsoft-signed, `…\Windows Defender\Platform\…`), account SYSTEM.
+- Excluded `RegistryValueName` is a **legitimate signed application in `C:\Program Files\<vendor>\`**
+  (e.g. `C:\Program Files\FreeFileSync\FreeFileSync.exe`), corroborated by real end users running that app
+  and/or a vendor installer running near the alert time.
+- `PreviousRegistryValueName == RegistryValueName` (pre-existing exclusion re-committed) and/or the write
+  coincides with a **Defender platform update** or **app install/update**.
+- **No** AV/Malware/Quarantine detections on the host (validated non-empty companion).
+- Verdict: **False Positive — overbroad "Defender exclusion tamper" rule misfires on legitimate software
+  registering its own exclusions.** Recommend tuning: allow-list exclusion writes whose `RegistryValueName`
+  is a known-good vendor path under `C:\Program Files\`, and reserve the alert for exclusions pointing at
+  **user-writable / temp / ProgramData / AppData / web-download** paths.
+
+The **would-be-malicious** shape (→ escalate): an exclusion for a path in a **user-writable / temp /
+AppData / ProgramData** location, or for a broad path (`C:\`, a whole user profile) or a scripting
+extension (`.ps1`, `.exe` globally); set **shortly after** a suspicious dropper/LOLBin execution or an
+AV detection on the host; especially where the excluded binary is unsigned or has no run history as a
+known app. MosaicLoader proper drops to `%ProgramData%`/`%LOCALAPPDATA%` and excludes *that* — not a
+Program Files vendor app.

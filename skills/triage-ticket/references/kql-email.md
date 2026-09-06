@@ -2,9 +2,9 @@
 
 For MDO alerts of the *"Messages containing malicious entity not removed after delivery"* /
 Zero-hour Auto Purge (ZAP) family. **Run all queries via terminal `az rest`** against the Log
-Analytics workspace (see SKILL.md §0 for workspace IDs and the `az rest` pattern). On **TOS**,
+Analytics workspace (see SKILL.md §0 for workspace IDs and the `az rest` pattern). On **CLTA**,
 all email tables (`EmailEvents`, `UrlClickEvents`, `EmailPostDeliveryEvents`, `EmailUrlInfo`,
-`CloudAppEvents`) are ingested into `log-prod-us` and fully queryable from the terminal. The join
+`CloudAppEvents`) are ingested into `<CLTA_WORKSPACE_NAME>` and fully queryable from the terminal. The join
 key is the **`NetworkMessageId`**, taken from the `SecurityAlert.Entities` JSON (query via terminal
 — the ticket often lists it in a column that reads like a user object ID — it is not). An incident
 may bundle **more than one** message; enumerate every Mail Message entity and OR all their IDs.
@@ -18,7 +18,7 @@ may bundle **more than one** message; enumerate every Mail Message entity and OR
 **The decision rests on two facts, in order: *where did it land* (`DeliveryLocation`) and *did anyone
 click* (`UrlClickEvents`).** `Junked`/`Quarantine` + zero clicks = no-impact cleanup; `Inbox/folder`
 + still present raises exposure; any `UrlClickEvents` row (esp. `IsClickedThrough`) converts it to a
-credential-compromise investigation. See the AUT-3374 (junked/no-impact) and AUT-3496
+credential-compromise investigation. See the CLTB-3374 (junked/no-impact) and CLTB-3496
 (inbox-delivered/remediation-required) IIRR pages in the Claude Decision History for worked examples.
 
 ## Query patterns
@@ -131,7 +131,7 @@ EmailEvents
 
 | Trap | Symptom | Workaround |
 |------|---------|------------|
-| Email tables not in every workspace | Some workspaces do not ingest `EmailEvents` / `EmailPostDeliveryEvents` / `UrlClickEvents` — a `| take 5` returns zero | Validate the table is populated in the workspace before trusting a zero result. TOS `log-prod-us` has them all; AUT `log-prod` does not |
+| Email tables not in every workspace | Some workspaces do not ingest `EmailEvents` / `EmailPostDeliveryEvents` / `UrlClickEvents` — a `| take 5` returns zero | Validate the table is populated in the workspace before trusting a zero result. CLTA `<CLTA_WORKSPACE_NAME>` has them all; CLTB `<CLTB_WORKSPACE_NAME>` does not |
 | Joining through `AlertInfo`/`AlertEvidence` on the alert window | Zero rows even though message telemetry is fully present | Filter directly on `NetworkMessageId` from the incident entity panel; don't derive it from alert joins |
 | Ticket GUID ≠ user object ID | The incident lists a GUID in a user-looking column | It is the `NetworkMessageId`. Also: an incident can bundle several — enumerate every Mail Message entity and OR all IDs |
 | SMTP address is not the UPN | `EntraIdSignInEvents \| search "<name>"` returns zero despite an active user | The SMTP alias may differ from the UPN; use `IdentityInfo` (pattern 5) to resolve, then key on the real UPN. Also confirm `AccountDisplayName` to avoid surname collisions |

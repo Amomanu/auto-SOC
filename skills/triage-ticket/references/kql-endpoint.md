@@ -4,7 +4,7 @@ Covers Sentinel scheduled-analytics and Defender/XDR detections that fire on **e
 process behavior** — e.g. "Regsvr32 Rundll32 Image Loads Abnormal Extension", suspicious
 LOLBin execution, unusual DLL/image loads, script-host spawns. Source telemetry is the
 **MDE device tables**, which in this tenant are streamed into the Log Analytics workspace
-(`log-prod-us`) and queryable via terminal `az rest` (see SKILL.md §0 for workspace IDs and
+(`<CLTA_WORKSPACE_NAME>`) and queryable via terminal `az rest` (see SKILL.md §0 for workspace IDs and
 the `az rest` pattern).
 
 Core tables:

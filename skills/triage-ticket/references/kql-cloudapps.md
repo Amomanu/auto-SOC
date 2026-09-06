@@ -5,7 +5,7 @@ activity & OAuth-app anomalies. Covers alerts where the fired product is an MDCA
 **OAuth application** or on **user activity**, e.g.:
 
 - **"Increase in app activity on Exchange"** — an OAuth-app anomaly (volume + distinct-user counter
-  on the app's Graph→Exchange calls). *(AUT-4798 — Benign Positive.)*
+  on the app's Graph→Exchange calls). *(CLTB-4798 — Benign Positive.)*
 - (Existing MDCA activity-policy detections — "Multiple failed user log on attempts to an app",
   "Mass delete involving one user", "Impossible travel", "Multiple failed logon to a service" — have
   their own IIRR pages; they are volume/activity counters on **user** activity rather than on an app.)
@@ -180,7 +180,7 @@ alerts (risky sign-in, AiTM, impossible travel, anomalous token); don't over-att
 
 - **Benign Positive** — Delegated permissions; own-mailbox (`/me/…`) access; verified-publisher
   and/or admin-consented app; the "increase" resolves to new-user onboarding; sends 1:1 with no
-  ThreatTypes; no forwarding/inbox-rule created; low-risk on-network consent sign-ins. *(AUT-4798.)*
+  ThreatTypes; no forwarding/inbox-rule created; low-risk on-network consent sign-ins. *(CLTB-4798.)*
 - **True Positive (OAuth-app compromise / exfiltration)** — Application permissions reading
   multiple/other mailboxes; a bulk read/download burst on one mailbox; mass external sending or a
   per-message recipient fan-out; a new auto-forward/inbox rule; unverified/unknown publisher or
@@ -258,7 +258,7 @@ If all sign-ins from outside known ranges are from the same geography and device
 - **Benign Positive** — User has dozens/hundreds of anonymous IP alerts from the same /24 ranges;
   flagged IP is in a /24 already in the user's baseline; all geolocate to the same US city; device
   fingerprint consistent; no sign-ins from foreign/unknown locations; account recently confirmed safe
-  and same pattern resumed. *(TOS-39495.)*
+  and same pattern resumed. *(CLTA-39495.)*
 - **True Positive** — Proxy IP is novel (not in any known /24); geolocates to a foreign country;
   post-compromise indicators present (anomalous mailbox rules, unusual app consents, mass email);
   other alert types fire alongside (impossible travel, AiTM, password spray success); user has no

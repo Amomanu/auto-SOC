@@ -1,12 +1,12 @@
 # Incident Investigation & Response Record (IIRR) — page template
 
-The house format for documenting a triaged Sentinel case in Confluence (space: <ANALYST_NAME>,
-`<CONFLUENCE_SPACE_ID>`). Title convention:
+The house format for documenting a triaged Sentinel case in Confluence (space: Andrei Momanu,
+`~6059e7fc6bb16c00691e31ca`). Title convention:
 
 > **Incident Investigation & Response Record: `<Alert Title>`**
 
 Build with the Confluence MCP (`createConfluencePage` / `updateConfluencePage`, `contentFormat: markdown`).
-**Publishing/updating a Confluence page is outward-facing — confirm with the analyst before writing it.**
+**Publishing/updating a Confluence page is outward-facing — confirm with Andrei before writing it.**
 
 ---
 
@@ -26,7 +26,7 @@ The playbook is then buried inside the case that happened to be documented first
 to diff three stories to work out what actually generalises.
 
 **So: no per-case narrative sections.** The playbook steps are written generally, and each one cites
-a real observed result inline as evidence that the step works — `**Found (<TICKET_KEY>):** …`. Concrete
+a real observed result inline as evidence that the step works — `**Found (AUT-3531):** …`. Concrete
 per-ticket values live in `# Reference data`. Nothing is fully detailed on the page; everything is
 attributed, so any of it can be traced back to a ticket.
 
@@ -91,7 +91,7 @@ Queries live in `# Investigation playbook`, **one per purpose, parameterized** �
   pinned to the burst" — are two, and both stay.
 - **Name the variant's purpose** when one query has genuine variants, so it's clear which to reach
   for.
-- Each step records what a real run returned, attributed: `**Found (<TICKET_KEY>):** 79 rows, every one
+- Each step records what a real run returned, attributed: `**Found (TOS-36635):** 79 rows, every one
   from one IP.` That is what makes a general step trustworthy without a case narrative around it.
 
 ---
@@ -117,7 +117,7 @@ The ledger. One row per ticket, newest first.
 
 | Ticket | Sentinel | Date | Client | Subject | Outcome | Deciding evidence |
 |---|---|---|---|---|---|---|
-| `CLTB-1234` | 13778 | 2026-07-27 | CLTB | `user@example.com` | True Positive, unsuccessful | 241 foreign IPs, `50053`, no attacker success |
+| `AUT-1234` | 13778 | 2026-07-27 | AUT | `user@brand.com` | True Positive, unsuccessful | 241 foreign IPs, `50053`, no attacker success |
 
 Close it with:
 
@@ -142,7 +142,7 @@ The generalized sequence, numbered, reusable as-is. Each step:
 - **Tool:** the console / table / MCP used
 - **Reviewed:** what to inspect
 - **Query:** the parameterized KQL, inline
-- **Found (`<TICKET_KEY>`):** what a real run returned — attributed, one or two lines
+- **Found (`<TICKET>`):** what a real run returned — attributed, one or two lines
 - **Why:** what the step establishes, and what result would flip the verdict
 
 Always include the *set aside any pre-existing verdict* step and the *disconfirming test* step, and
@@ -191,7 +191,7 @@ Strike items when they close.
 ### `# Tooling reference`
 
 Table: **Data source | How to access it**. Ticket (Jira MCP), Sentinel incident / KQL tables
-(terminal `az rest` → Log Analytics API), identity data (MS Graph Enterprise MCP).
+(terminal `az rest` → Log Analytics API), TOS identity data (MS Graph Enterprise MCP).
 
 ### Closing prose paragraph
 

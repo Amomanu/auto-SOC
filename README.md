@@ -41,7 +41,7 @@ examples/
 - **Atlassian (Jira/Confluence) MCP** — connected in Claude Code
 - **Microsoft MCP Server for Enterprise** — for identity lookups (optional, single-tenant)
 - **Azure CLI** (`az`) — authenticated to each tenant you triage
-- **Log Analytics - data to query
+- **Log Analytics** - data to query
 
 ## Setup
 

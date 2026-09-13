@@ -41,7 +41,7 @@ wsl.exe -u root bash -c "tr -d '\r' < /mnt/c/Users/<USER>/.claude/skills/triage-
 ```
 The script copies the **already-patched** source from `/mnt/c/Users/<USER>/inkbox-ai/claude-code-plugin`
 (patch marker `_external_handler_active` present ×4), makes a Linux venv, `pip install -e .`, and writes
-`/root/.inkbox-claude/.env` with the existing identity `agent-notification`, the API key, the signing key,
+`/root/.inkbox-claude/.env` with the existing identity `<INKBOX_IDENTITY>`, the API key, the signing key,
 and `INKBOX_EXTERNAL_HANDLER_LOG=/root/.inkbox-claude/events.jsonl`. doctor is all ✓ except
 `claude CLI not on PATH` — **that ✗ is expected and harmless**: the patch disables the gateway's own
 Claude sessions whenever the external-handler log is set; we consume events via the Monitor instead.
@@ -53,7 +53,7 @@ wsl.exe -u root bash -lc 'cd /root/inkbox-ai/claude-code-plugin && PYTHONUTF8=1 
 Confirm the tunnel connected (this is the line that never appears on Windows-native):
 ```bash
 wsl.exe -u root bash -lc 'grep "\[bridge\] ready" /root/.inkbox-claude/gateway.log'
-# also: "tunnel runtime: initial connection established" + "[bridge] tunnel ready: https://agent-notification.inkboxwire.com -> 127.0.0.1:8767"
+# also: "tunnel runtime: initial connection established" + "[bridge] tunnel ready: https://<INKBOX_IDENTITY>.inkboxwire.com -> 127.0.0.1:8767"
 ```
 `start` daemonizes (POSIX fork works in WSL); WSL2 keeps the VM alive while the daemon runs.
 

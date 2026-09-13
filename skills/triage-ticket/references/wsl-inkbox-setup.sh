@@ -27,7 +27,7 @@ echo "[*] writing /root/.inkbox-claude/.env"
 mkdir -p /root/.inkbox-claude /root/claude-pushed
 cat > /root/.inkbox-claude/.env <<EOF
 INKBOX_API_KEY=<INKBOX_API_KEY>
-INKBOX_IDENTITY=agent-notification
+INKBOX_IDENTITY=<INKBOX_IDENTITY>
 CLAUDE_PROJECT_DIR=/root/claude-pushed
 INKBOX_ALLOW_ALL_USERS=true
 INKBOX_SIGNING_KEY=<INKBOX_SIGNING_KEY>

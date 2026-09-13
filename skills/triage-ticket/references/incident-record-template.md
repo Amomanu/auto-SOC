@@ -6,7 +6,7 @@ The house format for documenting a triaged Sentinel case in Confluence (space: <
 > **Incident Investigation & Response Record: `<Alert Title>`**
 
 Build with the Confluence MCP (`createConfluencePage` / `updateConfluencePage`, `contentFormat: markdown`).
-**Publishing/updating a Confluence page is outward-facing — confirm with the analyst before writing it.**
+**Publishing/updating a Confluence page is outward-facing — confirm with <ANALYST_NAME> before writing it.**
 
 ---
 

@@ -131,14 +131,58 @@ EmailEvents
 
 | Trap | Symptom | Workaround |
 |------|---------|------------|
-| Email tables not in every workspace | Some workspaces do not ingest `EmailEvents` / `EmailPostDeliveryEvents` / `UrlClickEvents` — a `| take 5` returns zero | Validate the table is populated in the workspace before trusting a zero result. CLTA `<CLTA_WORKSPACE_NAME>` has them all; CLTB `<CLTB_WORKSPACE_NAME>` does not |
+| Email tables not in every workspace | Some workspaces do not ingest `EmailEvents` / `EmailPostDeliveryEvents` / `UrlClickEvents` — a `| take 5` returns zero | Validate the table is populated in the workspace before trusting a zero result. CLTA `<CLTA_WORKSPACE_NAME>` has them all; CLTB `<CLTB_WORKSPACE_NAME>` has `EmailEvents` / `EmailPostDeliveryEvents` / `UrlClickEvents` / `EmailUrlInfo` since 2026-09-09 but **not** `CloudAppEvents` |
 | Joining through `AlertInfo`/`AlertEvidence` on the alert window | Zero rows even though message telemetry is fully present | Filter directly on `NetworkMessageId` from the incident entity panel; don't derive it from alert joins |
 | Ticket GUID ≠ user object ID | The incident lists a GUID in a user-looking column | It is the `NetworkMessageId`. Also: an incident can bundle several — enumerate every Mail Message entity and OR all IDs |
 | SMTP address is not the UPN | `EntraIdSignInEvents \| search "<name>"` returns zero despite an active user | The SMTP alias may differ from the UPN; use `IdentityInfo` (pattern 5) to resolve, then key on the real UPN. Also confirm `AccountDisplayName` to avoid surname collisions |
 | Zero rows treated as evidence | Empty click / rule / sign-in result read as "nothing happened" | Pair every negative with a companion query proving the table is populated (patterns 4b, 7-validation) |
 | Enabled mailbox, zero sign-ins | `EntraIdSignInEvents` empty for an enabled account over 30d | Valid *validated* negative (no logon surface), not an error — but state it explicitly; you cannot present a clean sign-in baseline that doesn't exist |
 | `UrlClickEvents` has no `UrlDomain` | `project ... UrlDomain` → *"Failed to resolve scalar expression named 'UrlDomain'"* | `UrlClickEvents` carries `Url` only; drop `UrlDomain` (it exists on `EmailUrlInfo`) |
+| `first` / `last` as summarize aliases | `Query could not be parsed at 'first'` | Reserved words in KQL. Use `firstSeen=min(...)`, `lastSeen=max(...)` |
+| `IdentityInfo` column names differ in CLTB `<CLTB_WORKSPACE_NAME>` | `Failed to resolve scalar expression named 'AccountUpn'` / `'EmailAddress'` | CLTB `IdentityInfo` uses `AccountUPN` (capital UPN), `MailAddress` (often empty) and `AccountName`; there is no `EmailAddress`. When unsure, `IdentityInfo \| search "<local part>" \| take 2` and read the columns back |
+| `union` of `SigninLogs` + `AADNonInteractiveUserSignInLogs` fails | `Failed to resolve expression 'LocationDetails.countryOrRegion'` / `'LocationDetails'` | Schema mismatch (dynamic vs string). Query the tables separately; `parse_json(LocationDetails)` on the non-interactive table (pattern 10) |
+| Incident `Closed / Undetermined` by "Microsoft XDR", empty `AlertIds` | Looks like a prior resolution; step-5 short-circuit would close the Jira ticket | XDR alert-correlation merge, alert still live in another incident. Run pattern 9, then investigate normally |
+| XDR-owned shell incident ignores Sentinel classification writes | PUT to the Sentinel incidents API returns 200, etag advances, but `classification` stays `Undetermined` | The shell has `providerName = Microsoft XDR` and was closed by alert correlation; classification lives on the XDR incident that now holds the alert. Always GET after PUT to confirm; record the verdict in Jira and never state the Sentinel classification was updated without that GET (CLTB-6311) |
 | Costly leading scan | `CloudAppEvents \| search "..."` / `RawEventData has` over 30d eats a large share of the 15-min query allocation | Put the indexed `where ActionType contains ...` first, then narrow by account |
+
+### 9. Incident closed by "Microsoft XDR" with `Classification = Undetermined` — check for an alert-correlation merge before short-circuiting
+A Sentinel incident that shows `Status = Closed`, `ModifiedBy = "Microsoft XDR"`, `Classification =
+Undetermined` and an **empty `AlertIds`** on its latest row was not resolved by anyone — Defender XDR
+alert correlation moved the alert into a different (usually multi-user "Initial access") incident and
+closed the now-empty shell. The alert itself is still live. **Do not apply the step-5 short-circuit**;
+find where the alert went and investigate normally. (CLTB-6311: alert moved 20397 → 20393 → 20230.)
+```kusto
+let ids = SecurityIncident | where IncidentName == "<incident-guid>"
+  | mv-expand AlertIds | extend AlertId = tostring(AlertIds) | where isnotempty(AlertId) | distinct AlertId;
+union
+ (SecurityIncident | where IncidentName == "<incident-guid>"
+   | project TimeGenerated, Kind="history", IncidentNumber, Status, Classification, ModifiedBy, AlertIds=tostring(AlertIds)
+   | sort by TimeGenerated asc),
+ (SecurityIncident | where TimeGenerated > ago(3d) | mv-expand AlertIds | extend AlertId = tostring(AlertIds)
+   | where AlertId in (ids) and IncidentName != "<incident-guid>"
+   | summarize arg_max(TimeGenerated, Status, Classification, ModifiedBy, Title) by IncidentNumber, IncidentName),
+ (SecurityAlert | where TimeGenerated > ago(3d) | where SystemAlertId in (ids)
+   | project TimeGenerated, Kind="alert", Status, AlertName, ProductName, SystemAlertId)
+```
+When closing out, re-classify the merged-away shell incident (PUT, see SKILL.md guardrails) so the
+sibling-classification history stays consistent; leave the multi-user correlation incident alone
+unless the ticket covers it.
+
+### 10. Post-delivery sign-ins across interactive + non-interactive tables (CLTB terminal)
+`union SigninLogs, AADNonInteractiveUserSignInLogs` fails on `LocationDetails` (dynamic in one table,
+string in the other) — query the two tables **separately** and `parse_json(LocationDetails)` on the
+non-interactive one. Both are ingested in CLTB `<CLTB_WORKSPACE_NAME>`.
+```kusto
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > datetime(<delivery-time>)
+| where UserPrincipalName has "<recipient local part>"
+| extend loc = parse_json(LocationDetails)
+| summarize n=count(), firstSeen=min(TimeGenerated), lastSeen=max(TimeGenerated), apps=make_set(AppDisplayName, 6)
+        by UserPrincipalName, IPAddress, Country=tostring(loc.countryOrRegion), State=tostring(loc.state), ResultType
+| sort by n desc
+```
+Mobile-carrier IPv6 (`2600:1005:` Verizon, `2601:` Comcast) with `Outlook Mobile` / `Microsoft
+Authentication Broker` in the same state as the office IP is the user's phone, not off-baseline.
 
 ## Reusable classification logic (MDO post-delivery / ZAP type)
 
@@ -161,3 +205,37 @@ the campaign reached many recipients at inbox level.
 > A failed purge is only as serious as the exposure it failed to remove. Establish where the message
 > landed and whether anyone touched it before deciding what the failure cost — and treat Defender's
 > Malware/Phish verdict as authoritative even when the content reads like bulk marketing/graymail.
+
+## Sub-type: "Mail bombing activity detected" (M365 Defender / XDR volume detection)
+
+A **different animal** from ZAP — a *volume* alarm, not a payload alarm (`MicrosoftThreatProtection`,
+T1566/InitialAccess). Defender clusters a burst of inbound mail to one mailbox into a `mailCluster`
+entity; the messages are almost always **legitimate ESP newsletter "Please Confirm Subscription"
+double-opt-in** emails (Mailchimp/Mandrill `mcsignup.com`, Brevo `brevosend.com`) — i.e. an attacker
+subscription-bombed the address. **Nothing to ZAP/purge; the mail content is not the attack.** The
+detection is a **precursor** — it precedes MFA-fatigue/takeover or a help-desk **vishing** call.
+
+- **Decision axis = follow-on impact, not the mail.** It's a True Positive on the *activity*; the
+  split is whether an account compromise followed. Ignore delivery/click; pivot to identity + audit.
+- **Get the mail picture from `SecurityAlert.Entities`** (the `mailCluster` + sampled `mailMessage`
+  entities) — the GUIDs in the ticket entity table are `NetworkMessageId`s, not user ids.
+- **Disconfirming test (run early):** sign-ins over `ago(10d)` from established vs. off-baseline
+  sources, and audit for account changes the flood might hide.
+  - **CLTB / terminal:** `SigninLogs`, `AADNonInteractiveUserSignInLogs` — both ingested, query separately per pattern 10 (geo/IP/risk/off-baseline
+    success), `AuditLogs` (password reset, MFA/auth-method registration, inbox forwarding/delegation,
+    OAuth consent). `Update StsRefreshTokenValidFrom Timestamp` in `AuditLogs` = a **session
+    revocation** (defensive), often the customer admin — don't misread it as attacker activity.
+  - **CLTA / Defender AH:** the family's patterns 6–7 (`EntraIdSignInEvents`, `CloudAppEvents`).
+- **Classification:** clean identity/audit → **True Positive, no compromise** (close; advise the user
+  on the vishing follow-on — no unsolicited "IT" remote-access). Off-baseline sign-in / MFA-fatigue
+  success / post-burst password-MFA-forwarding-consent change → **escalate to account-compromise IR**.
+  Not Benign Positive — the activity is malicious/unwanted even when no compromise follows.
+- **CLTB constraint (updated 2026-09-11):** `EmailEvents`/`UrlClickEvents`/`EmailPostDeliveryEvents`/
+  `EmailUrlInfo`, `SigninLogs`, `AADNonInteractiveUserSignInLogs` and `AuditLogs` **are** ingested in
+  `<CLTB_WORKSPACE_NAME>`; only `CloudAppEvents` is not. The direct `api.loganalytics.io` endpoint works for the
+  analyst account (CLTB-6119, CLTB-6311); if it ever 403s, fall back to the **ARM-proxied**
+  `management.azure.com/.../workspaces/<CLTB_WORKSPACE_NAME>/query?api-version=2017-10-01` path.
+  Full flood volume is Defender-portal only.
+
+See the **"Mail Bombing Activity Detected"** IIRR page (Claude Decisions History → Email) for the
+full parameterized playbook. First case: CLTB-6098 / incident 19791 (True Positive, no compromise).

@@ -275,3 +275,139 @@ If all sign-ins from outside known ranges are from the same geography and device
 
 See the IIRR page **"Incident Investigation & Response Record: Activity from an Anonymous Proxy
 (MDCA)"** (Confluence, Claude Decisions History → Cloud Apps) for the full playbook and case ledger.
+
+---
+
+## Query patterns — Mass delete involving one user (MDCA volume policy)
+
+Detector `MCAS_ALERT_ANUBIS_DETECTION_REPEATED_ACTIVITY_DELETE`. The alert is a delete-count
+threshold in one session. The decisive question is **scope** (own OneDrive vs shared / other user)
+and the second is **shape** (destruction vs the delete half of a copy/move). *(CLTB-6310.)*
+
+**Table choice:** `CloudAppEvents` where ingested; **CLTB `<CLTB_WORKSPACE_NAME>` has no `CloudAppEvents` —
+use `OfficeActivity`** (OneDrive / SharePoint / Exchange workloads). Validate with
+`union withsource=T CloudAppEvents, OfficeActivity | where TimeGenerated > ago(7d) | summarize count() by T`.
+
+Substitute `<UPN>` (the OneDrive/SharePoint `UserId` — on CLTB this is the `.co` UPN, not the `.com`
+mail address), `<START>`, `<END>`.
+
+### 1. All operations for the user around the alert window (find the burst, learn the identifiers)
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId has "<SURNAME>"
+| summarize Count=count(), First=min(TimeGenerated), Last=max(TimeGenerated) by UserId, Operation, OfficeWorkload
+| sort by Count desc
+```
+Run this *before* filtering on operation names. It shows every `UserId` spelling the audit uses and
+every operation type in play.
+
+### 2. Deletion scope — decisive
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId =~ "<UPN>"
+| where Operation in ("FileDeleted","FileRecycled","FolderRecycled","FileDeletedFirstStageRecycleBin","FileDeletedSecondStageRecycleBin","FileVersionsAllDeleted")
+| extend Ext = tolower(extract(@"\.([A-Za-z0-9]+)$", 1, SourceFileName)),
+         Top3 = strcat_array(array_slice(split(SourceRelativeUrl, "/"), 0, 3), "/")
+| summarize Count=count(), Distinct=dcount(SourceFileName), First=min(TimeGenerated), Last=max(TimeGenerated),
+            Exts=make_set(Ext, 8) by Operation, Site_Url, Top3
+| sort by Count desc
+```
+`Site_Url` under `<tenant>-my.sharepoint.com/personal/<user>/` = own OneDrive. Anything under
+`<tenant>.sharepoint.com/sites/...` or another user's `personal/` path escalates on its own.
+
+### 3. Shape — copy/move versus destruction
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId =~ "<UPN>"
+| where Operation in ("FileDeleted","FileCopied","FolderCopied","FileMoved","FileUploaded")
+| summarize Deleted=countif(Operation=="FileDeleted"), Copied=countif(Operation in ("FileCopied","FolderCopied")),
+            Moved=countif(Operation=="FileMoved") by bin(TimeGenerated, 5m)
+| sort by TimeGenerated asc
+```
+Deletes and copies tracking each other bin-for-bin = a copy/move job. Confirm the trees match:
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId =~ "<UPN>" and Operation in ("FileCopied","FolderCopied")
+| extend Top = strcat_array(array_slice(split(tostring(OfficeObjectId), "/"), 0, 7), "/")
+| summarize Count=count() by Operation, Top
+```
+**On copy rows the path lives in `OfficeObjectId`** — `SourceRelativeUrl`, `SourceFileName`,
+`Site_Url`, `ClientIP`, `UserAgent` are all empty. A same-second `FileAccessed` burst on a second
+library (also with empty IP/UA) is the job reading its source; that library still holds the data.
+
+### 4. Where the data came from / went (SharePoint side)
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId =~ "<UPN>" and OfficeWorkload == "SharePoint"
+| extend Top = strcat_array(array_slice(split(tostring(OfficeObjectId), "/"), 0, 7), "/")
+| summarize Count=count(), First=min(TimeGenerated), Last=max(TimeGenerated) by Operation, Site_Url, Top
+| sort by Count desc
+```
+Widen to the preceding days: a `FileSyncDownloadedFull` (SharePoint) + `FileSyncUploadedFull`
+(OneDrive) pair of similar size is a drive-archive migration and explains a later re-copy.
+
+### 5. Client fingerprint of the burst (expect blanks on server-side jobs)
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where UserId =~ "<UPN>"
+| summarize Count=count() by Operation, IP=coalesce(tostring(Client_IPAddress), tostring(ClientIP)), UserAgent
+| sort by Count desc
+```
+Interactive rows (`FileAccessed` from the Nucleus/OneDrive desktop client, Edge, Excel) carry the
+IP; those should match the `SigninLogs` baseline.
+
+### 6. Mailbox persistence (validate the zero)
+```kql
+OfficeActivity
+| where TimeGenerated > ago(14d)
+| where UserId has "<SURNAME>" and OfficeWorkload == "Exchange"
+| where Operation in ("New-InboxRule","Set-InboxRule","UpdateInboxRules","Set-Mailbox","Add-MailboxPermission","Remove-InboxRule")
+| summarize Count=count(), Last=max(TimeGenerated) by Operation
+```
+Companion (drop the `UserId` filter) must return rows or the zero is unvalidated.
+
+### 7. Spread — other accounts deleting in the same window
+```kql
+OfficeActivity
+| where TimeGenerated between (datetime(<START>) .. datetime(<END>))
+| where Operation in ("FileDeleted","FileRecycled","FolderRecycled")
+| summarize Count=count(), Users=dcount(UserId), Top=make_set(UserId, 5) by Operation, OfficeWorkload
+| sort by Count desc
+```
+Doubles as the ingestion validation for step 2.
+
+Sign-in sweep, `SecurityAlert` breadth and sibling `SecurityIncident` queries: as in the family
+patterns above (`SigninLogs` uses `DeviceDetail.operatingSystem` directly; on
+`AADNonInteractiveUserSignInLogs` wrap with `parse_json()` — and query the two tables separately,
+a `union` with `extend DeviceDetail.…` fails to resolve).
+
+### Mass delete — traps
+
+| Trap | Symptom | Workaround |
+|---|---|---|
+| `Operation has "Delete"` | Zero rows although thousands of `FileDeleted` exist | `has` is whole-term; use `in (...)` or `contains` |
+| Copy rows look empty | `FileCopied` with blank `Site_Url`/`SourceFileName`/IP | Path is in `OfficeObjectId`; join on that, not `SourceFileName` |
+| Blank IP read as evasion | Delete/copy rows have no `ClientIP`/`UserAgent` | Server-side SharePoint job; fingerprint via `SigninLogs` |
+| UPN vs mail address | `UserId =~ "<mail>"` finds only Exchange rows | OneDrive/SharePoint rows use the UPN suffix (`.co` on CLTB) |
+| `CloudAppEvents` empty | No rows for anyone | Not ingested in CLTB `<CLTB_WORKSPACE_NAME>`; use `OfficeActivity` |
+| `IdentityInfo` column | `Failed to resolve 'AccountUpn'` | Column is `AccountUPN` |
+
+### Mass delete — classification logic
+
+- **Benign Positive** — own OneDrive only; concurrent copy/move of the same tree or a tight
+  single-folder cleanup; source library intact; sign-ins at baseline (one egress or one `/64`,
+  AAD-joined device, no risk, no failures); no identity alerts; no inbox rules; role fits the data;
+  **user confirms**. Deleted items sit in the OneDrive recycle bin.
+- **Awaiting customer confirmation** — all of the above except the confirmation. Ticket stays in
+  progress with the question drafted. *(CLTB-6310.)*
+- **Escalate** — deletions in shared/group/other-user libraries; sign-in anomalies in the window;
+  post-compromise companions; the same pattern on several accounts; encryption/rename alongside.
+
+See the IIRR page **"Incident Investigation & Response Record: Mass delete involving one user"**
+(Confluence, Claude Decisions History → Cloud Apps) for the playbook and case ledger.

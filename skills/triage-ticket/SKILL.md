@@ -127,7 +127,7 @@ Companion references (read them when you reach the step that needs them):
   `ExtendedProperties` in broad scans — these are large dynamic columns that bloat the JSON response.
   When you need `Entities`, query it in a separate targeted query (e.g. one incident/alert) and
   dump the result to your per-run file:
-  `... > C:/Users/andre/AppData/Local/Temp/triage/<TICKET>-<rand>/result.json` (Bash redirection to
+  `... > C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/result.json` (Bash redirection to
   the per-run path), then read it with the `Read` tool.
 - **Parse results from JSON.** `az rest` returns `{ "tables": [{ "columns": [...], "rows": [...] }] }`.
   Row values are positional against the `columns` array. For complex results, dump to a file and
@@ -182,7 +182,7 @@ Companion references (read them when you reach the step that needs them):
 - **Close / reopen:** GET the incident for a fresh `etag`, write the PUT body to the per-run temp
   file (etag + `properties.status` + `severity` + `title` + classification fields), then:
   ```
-  pwsh -File scripts/incident-api.ps1 -Method put -Url "<incident ARM URL>" -BodyFile "C:\Users\andre\AppData\Local\Temp\triage\<TICKET>-<rand>\close.json"
+  pwsh -File scripts/incident-api.ps1 -Method put -Url "<incident ARM URL>" -BodyFile "C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\close.json"
   ```
 - **Comment:** PUT to `<incident URL without api-version>/comments/<new-guid>?api-version=2024-03-01`
   with `-BodyFile` holding `{"properties":{"message":"…"}}`.
@@ -201,12 +201,12 @@ table — runs through the least-privilege log-reader SP via **`scripts/kql.ps1`
 `az` session. The SP can read every table but cannot write incidents or touch the directory.
 
 - **Run a query — write the RAW KQL to the per-run file, then call the wrapper with `pwsh`:**
-  1. `Write` tool → `C:\Users\andre\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql` (plain KQL,
+  1. `Write` tool → `C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql` (plain KQL,
      multi-line is fine — **no** `{"query":…}` wrapper, **no** escaping; `kql.ps1` builds the JSON
      body itself).
   2. `Bash`/`PowerShell` tool:
      ```
-     pwsh -File scripts/kql.ps1 -QueryFile "C:\Users\andre\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql"
+     pwsh -File scripts/kql.ps1 -QueryFile "C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql"
      ```
      Defaults to the CLTA workspace (`8205ba3e-…`). Returns `{ "tables":[{ "columns":[...], "rows":[...] }] }`.
 - **Why `pwsh`, not `powershell`:** Windows PowerShell 5.1 decorates `Get-Content -Raw` output with
@@ -248,21 +248,21 @@ way). At the start of the run pick a **short random token** (e.g. 4 hex chars �
 shell randomness needed) and build a per-run directory from the ticket key and that token:
 
 ```
-C:\Users\andre\AppData\Local\Temp\triage\<TICKET>-<rand>\
+C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\
 ```
 
 Put `qbody.json` and `result.json` inside it, and use the same directory for every query in the run.
 The `Write` tool creates the parent directory automatically, and the path stays under the
 allow-listed `~/AppData/Local/Temp/**` tree.
 
-Step 1 — `Write` tool, file `C:\Users\andre\AppData\Local\Temp\triage\<TICKET>-<rand>\qbody.json`:
+Step 1 — `Write` tool, file `C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\qbody.json`:
 ```
 {"query": "<KQL QUERY HERE — one line, inner double quotes escaped as \">"}
 ```
 
 Step 2 — `Bash` tool (literal per-run path, no variables, no here-strings):
 ```
-az rest --method post --url "https://api.loganalytics.io/v1/workspaces/<WORKSPACE_ID>/query" --headers "Content-Type=application/json" --body "@C:/Users/andre/AppData/Local/Temp/triage/<TICKET>-<rand>/qbody.json" --resource "https://api.loganalytics.io"
+az rest --method post --url "https://api.loganalytics.io/v1/workspaces/<WORKSPACE_ID>/query" --headers "Content-Type=application/json" --body "@C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/qbody.json" --resource "https://api.loganalytics.io"
 ```
 
 > Why this shape: in `claude -p` runs every tool call must match an allow rule or it is auto-denied.
@@ -279,7 +279,7 @@ Replace `<WORKSPACE_ID>` with the correct customerId:
 
 For large results (especially `SecurityAlert.Entities`), redirect output to the per-run file and read it:
 ```
-az rest ... > C:/Users/andre/AppData/Local/Temp/triage/<TICKET>-<rand>/result.json
+az rest ... > C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/result.json
 ```
 
 ### One-ticket concurrency lock — before running any queries
@@ -290,7 +290,7 @@ cooperative advisory lock keyed on the ticket, **once, right after step 4 (termi
 the first query**. Lock file (fixed name, one per ticket):
 
 ```
-C:\Users\andre\AppData\Local\Temp\triage\<TICKET>.lock
+C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>.lock
 ```
 
 1. **Read** the lock file with the `Read` tool, then branch:
@@ -372,7 +372,7 @@ response — and MCP polling is not a substitute, because it only runs when some
    If `/root/inkbox-ai/claude-code-plugin` doesn't exist yet, build it once (idempotent):
    ```bash
    wsl.exe -u root bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3.12-venv python3-pip'
-   wsl.exe -u root bash -c "tr -d '\r' < /mnt/c/Users/andre/.claude/skills/triage-ticket/references/wsl-inkbox-setup.sh > /tmp/s.sh && bash /tmp/s.sh"
+   wsl.exe -u root bash -c "tr -d '\r' < /mnt/c/Users/<USER>/.claude/skills/triage-ticket/references/wsl-inkbox-setup.sh > /tmp/s.sh && bash /tmp/s.sh"
    ```
 
 2. **Arm the Monitor** (this is what makes THIS session wake on inbound events) — line-buffered, NO pipe:

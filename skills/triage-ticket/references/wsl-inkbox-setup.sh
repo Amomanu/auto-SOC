@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 echo "[*] staging patched plugin source"
-SRC=/mnt/c/Users/andre/inkbox-ai/claude-code-plugin
+SRC=/mnt/c/Users/<USER>/inkbox-ai/claude-code-plugin
 DST=/root/inkbox-ai/claude-code-plugin
 rm -rf "$DST"; mkdir -p "$DST"
 cp -r "$SRC/inkbox_claude" "$DST/"

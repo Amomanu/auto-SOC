@@ -37,9 +37,9 @@ the bare `/root/...` path (NOT `C:/Program Files/Git/...`) with nothing piped af
 # 1. prereqs (root, no password needed)
 wsl.exe -u root bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3.12-venv python3-pip'
 # 2. build: stage patched source from the Windows repo, venv, install, write /root env, doctor
-wsl.exe -u root bash -c "tr -d '\r' < /mnt/c/Users/andre/.claude/skills/triage-ticket/references/wsl-inkbox-setup.sh > /tmp/s.sh && bash /tmp/s.sh"
+wsl.exe -u root bash -c "tr -d '\r' < /mnt/c/Users/<USER>/.claude/skills/triage-ticket/references/wsl-inkbox-setup.sh > /tmp/s.sh && bash /tmp/s.sh"
 ```
-The script copies the **already-patched** source from `/mnt/c/Users/andre/inkbox-ai/claude-code-plugin`
+The script copies the **already-patched** source from `/mnt/c/Users/<USER>/inkbox-ai/claude-code-plugin`
 (patch marker `_external_handler_active` present ×4), makes a Linux venv, `pip install -e .`, and writes
 `/root/.inkbox-claude/.env` with the existing identity `agent-notification`, the API key, the signing key,
 and `INKBOX_EXTERNAL_HANDLER_LOG=/root/.inkbox-claude/events.jsonl`. doctor is all ✓ except
@@ -82,7 +82,7 @@ Reply with `inkbox_imessage_send` (recipient `<ANALYST_PHONE>`, `conversation_id
 - Monitor times out ~30–60 min even at `timeout_ms:3600000` — re-arm on the timeout notice.
 - Monitor + daemon are session/VM-scoped: if the session ends, re-run "Start the daemon" + re-arm.
 - Teardown: `wsl.exe -u root bash -lc '/root/inkbox-ai/claude-code-plugin/.venv/bin/inkbox-claude stop'`.
-- Do NOT arm a Monitor on the **Windows** `C:\Users\andre\.inkbox-claude\events.jsonl` — nothing writes
+- Do NOT arm a Monitor on the **Windows** `C:\Users\<USER>\.inkbox-claude\events.jsonl` — nothing writes
   it (the Windows daemon can't run). The live event file is the **WSL** `/root/.inkbox-claude/events.jsonl`.
 
 ## Fallback only (bridge genuinely unavailable)

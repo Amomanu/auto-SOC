@@ -205,3 +205,71 @@ extension (`.ps1`, `.exe` globally); set **shortly after** a suspicious dropper/
 AV detection on the host; especially where the excluded binary is unsigned or has no run history as a
 known app. MosaicLoader proper drops to `%ProgramData%`/`%LOCALAPPDATA%` and excludes *that* — not a
 Program Files vendor app.
+
+---
+
+## Detection family — Defender for Cloud agentless malware detection ("'<name>' malware was detected (Agentless)")
+
+Microsoft **Defender for Cloud / Defender for Servers agentless** malware scanning (detector
+`VM.Agentless_MalwareWasDetected`, `OriginalAlertProductName = AgentlessAMThreatDetections`,
+`ProductName = "Azure Security Center"`). It snapshots the VM disk and scans it out-of-band — **no
+in-guest agent**, so there is **no** `DeviceProcessEvents`/`DeviceFileEvents` telemetry (and in CLTB
+`<CLTB_WORKSPACE_NAME>` the MDE `Device*` tables aren't ingested at all). Applies to Azure VMs and to **AWS/GCP
+VMs** onboarded via a Defender-for-Servers multicloud connector — the alert entity is then an AWS EC2
+instance id (e.g. `i-04f807a9cc73b1be3`), not a Windows device name. Source of truth is
+`SecurityAlert` + its `Entities`/`ExtendedProperties`; correlate breadth with `SecurityIncident`.
+
+> **`Trojan:Win32/MDC_TEST_FILE` is Microsoft's benign validation/test signature** (the EICAR-analog
+> for this pipeline) — a hit on it (file typically `…\test_file.ps1`) means the scanner works, not
+> that the host is compromised. → **Benign Positive**, not False Positive (the rule matched a real
+> file carrying the signature; it did not misfire). A *real* family name on the same detector, or any
+> follow-on alert on the host, → real malware, escalate.
+
+### Query patterns
+
+**1. Alert + entities (the crux — threat name, file, hashes, detector).** Read `Entities` and
+`ExtendedProperties` in a separate targeted query (large dynamic columns):
+```
+SecurityAlert | where SystemAlertId == "<ALERT_ID>"
+| project TimeGenerated, AlertName, ProductName, ProviderName, VendorName, AlertSeverity, Description, RemediationSteps, CompromisedEntity
+SecurityAlert | where SystemAlertId == "<ALERT_ID>" | project Entities, ExtendedProperties
+```
+`ExtendedProperties` carries `DetectorId`, `OriginalAlertProductName`, `Threat Category`, `Machine
+Name`, and the MDC `AlertUri`. `Entities` carries the `malware` entity (threat name), the `file`
+entity (path + `FileHashes`), and the `amazon-resources`/`host` entity with `ThreatAnalysisSummary`
+(an **empty `AnalyzersResult`** is consistent with a test-signature match, not a detonation).
+
+**2. Disconfirming/breadth sweep — any other alert on the host/instance (14 d):**
+```
+SecurityAlert
+| where TimeGenerated > ago(14d)
+| where Entities has "<HOST_OR_INSTANCE_ID>" or CompromisedEntity has "<HOST_OR_INSTANCE_ID>"
+| summarize arg_max(TimeGenerated, AlertSeverity, Status, ProductName) by AlertName, SystemAlertId
+| order by TimeGenerated desc | take 50
+```
+Clean sweep → supports Benign Positive; a real follow-on (execution/C2/lateral/AV) → escalate.
+
+**3. Validate the "no in-guest telemetry" zero** (so a host zero isn't read as a clean host):
+```
+union isfuzzy=true
+ (DeviceInfo | where TimeGenerated > ago(7d) | summarize n=count() | extend T="DeviceInfo_total_7d"),
+ (DeviceProcessEvents | where TimeGenerated > ago(7d) | where DeviceName has "<HOST>" | summarize n=count() | extend T="DeviceProcess_host")
+| project T, n
+```
+`DeviceInfo_total_7d = 0` ⇒ Device tables not ingested; the host zero is coverage, not a clean host.
+
+### Traps
+- **Severity anchoring.** The alert is `High` / category `Trojan` by default — that is a generic
+  malware-alert severity, not a measure of the specific signature. Read the **threat name** before
+  weighting severity. `MDC_TEST_FILE` = benign test.
+- **FP-vs-BP miscall.** A correct match on a genuine (if harmless) file is **Benign Positive**, not
+  False Positive — the rule did not misfire.
+- **Don't hunt absent process telemetry.** Agentless = no `Device*` rows; validate the zero and move on.
+- **AV-scan step is not actionable** on an agentless host — no Defender/MDE agent to run an on-demand
+  scan, and not warranted for a benign test artifact.
+
+### Classification logic — agentless malware detection
+- **Benign Positive (CLTB-6370):** threat `Trojan:Win32/MDC_TEST_FILE` (or file `…\test_file.ps1` with
+  the known test hashes), empty MDC analyzer result, clean 14-day host sweep. Test/validation
+  detection. Close BenignPositive / SuspiciousButExpected; optional narrow name/hash suppression.
+- **Escalate:** a real malware family name on the detector, or any follow-on alert on the host/account.

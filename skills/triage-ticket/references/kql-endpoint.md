@@ -216,7 +216,7 @@ Microsoft **Defender for Cloud / Defender for Servers agentless** malware scanni
 in-guest agent**, so there is **no** `DeviceProcessEvents`/`DeviceFileEvents` telemetry (and in CLTB
 `<CLTB_WORKSPACE_NAME>` the MDE `Device*` tables aren't ingested at all). Applies to Azure VMs and to **AWS/GCP
 VMs** onboarded via a Defender-for-Servers multicloud connector — the alert entity is then an AWS EC2
-instance id (e.g. `i-04f807a9cc73b1be3`), not a Windows device name. Source of truth is
+instance id (e.g. `i-0abc1234def567890`), not a Windows device name. Source of truth is
 `SecurityAlert` + its `Entities`/`ExtendedProperties`; correlate breadth with `SecurityIncident`.
 
 > **`Trojan:Win32/MDC_TEST_FILE` is Microsoft's benign validation/test signature** (the EICAR-analog

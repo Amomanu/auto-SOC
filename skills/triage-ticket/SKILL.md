@@ -28,10 +28,12 @@ was not examined.
   close/classify — **not** the log tables) → via the least-privilege **incident-lifecycle SP**
   wrapper `scripts/incident-api.ps1`, **not** the admin `az`. CLTA only; CLTB incident closes stay on
   admin `az`. See "CLTA Sentinel incidents" in §0.
-- **Notifications to <ANALYST_NAME>** → via **Inkbox AI** (`inkbox_imessage_send`). Recipient: <ANALYST_NAME>
-  <ANALYST_NAME> (`<ANALYST_PHONE>`). Sent on **True Positive** dispositions (escalation) and whenever the
-  skill **needs human approval or attention** to proceed (e.g. containment actions, auth expired,
-  ambiguous situation). Not a data source — outbound notification only.
+- **Notifications to <ANALYST_NAME>** → via **Inkbox AI** (`inkbox_imessage_send`). Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). An **end** notification is sent every run (no reply expected, no bridge).
+  A **reply-expecting** message — and the WSL bridge/Monitor to catch the reply — is sent on **True
+  Positive** dispositions (escalation), whenever the skill **needs human approval or attention** to
+  proceed (e.g. containment actions, auth expired, ambiguous situation), or whenever the skill **is
+  blocked by a data-source failure** it cannot work around (e.g. Confluence/Jira MCP unreachable,
+  SP auth expired, Graph MCP down). Not a data source — outbound notification only.
 - **Chrome** → **last-resort fallback only**, for data that genuinely cannot be retrieved from the
   terminal or the Graph MCP. This should never happen — all investigation data is available via the
   terminal and MCP channels above. If it ever does, confirm with <ANALYST_NAME> before switching to a
@@ -90,7 +92,7 @@ Companion references (read them when you reach the step that needs them):
     `DeviceImageLoadEvents`, `DeviceProcessEvents`, `DeviceNetworkEvents`, `DeviceRegistryEvents`.
   - `references/kql-cloudapps.md` — Microsoft Defender for Cloud Apps (MDCA) / "Microsoft Application
     Protection" OAuth-app or activity anomaly. Tables `OAuthAppInfo`, `GraphAPIAuditEvents`, etc.
-- `references/incident-record-template.md` — the IIRR Confluence page structure, **and the rule for
+- `references/iirr-conventions.md` — the IIRR Confluence page structure, **and the rule for
   when a new case earns an edit to the body versus just a ledger row.** Read it before writing to
   Confluence, not after.
 
@@ -106,6 +108,11 @@ Companion references (read them when you reach the step that needs them):
 - **Scope by `ago()` over days first, then narrow** once the true burst edges are known — fixed
   ±Nh windows anchored on alert time clip bursts.
 - Use **KQL mode** (not Simple) when constructing queries.
+- **Keep result sets lean.** Summarize to the columns that decide the verdict — not every
+  combination. For the disconfirming test (successes from attacker source), summarize by `IPAddress`
+  and `ResultType` only; drop `AppDisplayName` and `Type` unless the app is itself the question. A
+  user with rotating mobile IPs and multiple apps can produce 60+ rows when 5 would carry the same
+  signal. Per-app detail can be queried separately if a row raises a question.
 
 **Terminal-specific KQL conventions** (the admin `az rest` path — **CLTB**, and any non-CLTA use):
 > **CLTA runs KQL through the log-reader SP wrapper `scripts/kql.ps1`, not this admin `az` path** —
@@ -144,6 +151,25 @@ Companion references (read them when you reach the step that needs them):
 > you learned back in: update the matching cookbook (see step 8) and write the decision record
 > (see step 11) so the next analyst inherits it.
 
+## Tool loading — two tiers to reduce context cost
+
+Load MCP tool schemas in **two tiers**, not all at once. The first ToolSearch loads only the tools
+every triage run uses; the second loads conditionally when the investigation path demands them.
+
+**Tier 1 — always load at the start (one `ToolSearch` call):**
+```
+select:mcp__<INKBOX_MCP_ID>__inkbox_imessage_send,mcp__<ATLASSIAN_MCP_ID>__getJiraIssue,mcp__<ATLASSIAN_MCP_ID>__searchConfluenceUsingCql,mcp__<ATLASSIAN_MCP_ID>__getConfluencePage,mcp__<ATLASSIAN_MCP_ID>__addCommentToJiraIssue,mcp__<ATLASSIAN_MCP_ID>__transitionJiraIssue,mcp__<ATLASSIAN_MCP_ID>__getTransitionsForJiraIssue,mcp__<GRAPH_MCP_ID>__microsoft_graph_suggest_queries,mcp__<GRAPH_MCP_ID>__microsoft_graph_get
+```
+(9 tools: Inkbox send, Jira CRUD + transitions, Confluence search + read, Graph MCP.)
+
+**Tier 2 — load only when needed:**
+- **`createConfluencePage`, `updateConfluencePage`** → load at step 11 only if the IIRR page needs
+  creating or updating (new detection type, or something genuinely new was learned).
+- **`Monitor`, `TaskStop`** → load only when arming the Inkbox bridge (True Positive escalation,
+  containment approval, or blocked-on-human situations). Most tickets (FP/BP) never need these.
+
+This split saves ~20K tokens of unused schema on routine FP/BP cases (the majority of tickets).
+
 ## 0. Environment — where things live
 
 | Thing | Detail |
@@ -154,8 +180,8 @@ Companion references (read them when you reach the step that needs them):
 | Terminal — CLTB | **Tenant:** `<CLTB_TENANT_ID>` (`<CLTB_DOMAIN>`). **Subscription:** `<CLTB_SUBSCRIPTION_ID>` ("Sentinel"). **Signed-in as:** `<CLTB_ANALYST_UPN>`. **Workspace:** `<CLTB_WORKSPACE_NAME>` (RG `<CLTB_RESOURCE_GROUP>`), **customerId `<CLTB_WORKSPACE_ID>`**. Populated (verified 2026-09-11): `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AuditLogs`, `IdentityInfo`, `SecurityAlert`, `SecurityIncident`, `EmailEvents`, `EmailPostDeliveryEvents`, `UrlClickEvents`, `EmailUrlInfo`. **Not** ingested: `CloudAppEvents`. |
 | Sentinel incident SP (**CLTA only**) | Least-privilege app registration **SOC-Triage-IncidentLifecycle** (appId `<CLTA_INCIDENT_SP_APP_ID>`, tenant `<CLTA_TENANT_ID>`). Custom RBAC role **"SOC Incident Lifecycle"** on `<CLTA_WORKSPACE_NAME>` — incidents read/write + comments read/write **only** (no KQL/log query, no Graph). Drive it with the wrapper **`scripts/incident-api.ps1`** (`-Method get\|put -Url <ARM incident URL> [-BodyFile <json>]`): it decrypts the client secret from `~/.soc/triage-sp.secret` (DPAPI, this machine+user only), logs in as the SP on an isolated `AZURE_CONFIG_DIR`, makes one call, and logs out. **All CLTA Sentinel incident-object operations — read incident, comments, close/classify — go through this wrapper, not the admin `az` session** (see "CLTA Sentinel incidents" below). Cert auth will replace the secret later. |
 | KQL log-reader SP (**CLTA only**) | Least-privilege app registration **SOC-Triage-LogReader** (appId `<CLTA_LOGREADER_SP_APP_ID>`, tenant `<CLTA_TENANT_ID>`). Custom RBAC role **"SOC Log Reader"** on `<CLTA_WORKSPACE_NAME>` — `workspaces/read` + `workspaces/query/*/read` **only** (run KQL / read any table; **no** incident write, **no** Graph, **no** config write). Drive it with the wrapper **`scripts/kql.ps1`** (`-QueryFile <file of RAW KQL> [-WorkspaceId <customerId>]`): it decrypts `~/.soc/triage-kql.secret` (DPAPI, this machine+user), logs in as the SP on its own isolated `AZURE_CONFIG_DIR`, POSTs the query to `api.loganalytics.io`, and logs out. **All CLTA KQL runs through this — not the admin `az` session** (see "CLTA KQL" below). Cert auth will replace the secret later. |
-| MS Graph MCP (**CLTA only**) | **Microsoft MCP Server for Enterprise** — connected in Claude Desktop as the **"MS Graph Enterprise"** custom connector. Read-only Entra identity/directory queries against the **Client A tenant** (`<CLTA_TENANT_ID>`). Tools: `microsoft_graph_suggest_queries` (**always call first — mandatory before any get**), then `microsoft_graph_get`; `microsoft_graph_list_properties` to explore schema. **Always use it for CLTA identity information whenever it can answer.** **Single-tenant — never use it for Client B / CLTB / CLTB** (different tenant). |
-| Inkbox AI | **iMessage notifications** via `inkbox_imessage_send`. Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). Sent on **True Positive** dispositions (escalation) and whenever the skill **needs human approval or attention** (e.g. containment actions, auth failure, ambiguous situation). On TP with recommended containment: send the iMessage, then **wait in the chat** for <ANALYST_NAME> to respond before executing any containment action. |
+| MS Graph MCP (**CLTA only**) | **Microsoft MCP Server for Enterprise** — connected in Claude Desktop as the **"MS Graph Enterprise"** custom connector. Read-only Entra identity/directory queries against the **Client A tenant** (`<CLTA_TENANT_ID>`). Tools: `microsoft_graph_suggest_queries` (**always call first — mandatory before any get**), then `microsoft_graph_get`; `microsoft_graph_list_properties` to explore schema. **Always use it for CLTA identity information whenever it can answer.** **Single-tenant — never use it for Client B / CLTB** (different tenant). |
+| Inkbox AI | **iMessage notifications** via `inkbox_imessage_send`. Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). **End notification every run** (no reply expected, no bridge). **Reply-expecting** sends — plus the WSL bridge/Monitor armed to catch the reply — on **True Positive** dispositions (escalation), whenever the skill **needs human approval or attention** (e.g. containment actions, auth failure, ambiguous situation), or whenever the skill **is blocked by a data-source failure** it cannot work around (e.g. Confluence/Jira MCP unreachable, SP auth expired). On TP with recommended containment: arm the bridge, send the iMessage, then **wait** for <ANALYST_NAME> to respond before executing any containment action. |
 | Analyst | <ANALYST_NAME> (SOC). |
 
 ### CLTA Sentinel incidents — use the incident-lifecycle service principal (not your admin)
@@ -208,7 +234,7 @@ table — runs through the least-privilege log-reader SP via **`scripts/kql.ps1`
      ```
      pwsh -File scripts/kql.ps1 -QueryFile "C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql"
      ```
-     Defaults to the CLTA workspace (`8205ba3e-…`). Returns `{ "tables":[{ "columns":[...], "rows":[...] }] }`.
+     Defaults to the CLTA workspace (`<CLTA_WORKSPACE_ID>`). Returns `{ "tables":[{ "columns":[...], "rows":[...] }] }`.
 - **Why `pwsh`, not `powershell`:** Windows PowerShell 5.1 decorates `Get-Content -Raw` output with
   note-properties that corrupt the JSON body; the wrapper reads with `[IO.File]::ReadAllText` to be
   safe either way, but standardise on `pwsh`.
@@ -312,7 +338,18 @@ C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>.lock
 Advisory, not bulletproof against a to-the-second simultaneous start — but it eliminates the
 practical case, and together with the per-run query files above removes the file clobber entirely.
 
-## 1. Inkbox bridge — arm the WSL real-time bridge (do NOT drop to MCP polling)
+## 1. Inkbox notifications + on-demand bridge
+
+**Two things happen on the Inkbox channel, and they are decoupled:**
+1. **End notification — always, no bridge.** Send a one-line iMessage when triage finishes (see
+   "Notifications" below). This is fire-and-forget; <ANALYST_NAME> is not expected to reply, so the WSL
+   bridge/Monitor is **NOT** armed for it. **No start notification is sent.**
+2. **The real-time bridge/Monitor — on demand only.** Arm the WSL bridge + Monitor **only** when the
+   run needs a reply from <ANALYST_NAME>: a **containment action that needs approval**, a **True Positive
+   escalation**, or a **data-source failure** the skill cannot work around (e.g. Confluence/Jira MCP
+   unreachable after retries, SP auth expired, Graph MCP down — anything that blocks investigation
+   and needs <ANALYST_NAME> to fix). Most tickets (Benign / False Positive, no containment, no outages) never
+   arm it.
 
 > **⚠️ TAIL GOTCHA — TWO independent bugs, EITHER silently kills the wake (read before arming the Monitor).**
 > Use this exact Monitor command — do not simplify it:
@@ -343,9 +380,13 @@ practical case, and together with the per-run query files above removes the file
 > in an interactive Desktop run an approval iMessage was sent with the Monitor un-armed — the reply
 > would not have woken the session; arm-on-send is now mandatory regardless of session type.)
 >
-> Arm it proactively at step 1 whenever the case may plausibly need a reply (most do). If you reach a
-> send later without having armed it, arm it then — do not send first and arm afterthought. **Do not
-> proceed past a reply-expecting send without an armed, self-tested Monitor.**
+> **Do NOT arm it proactively at the start of every ticket.** The bridge/Monitor is armed **only**
+> when the run actually needs a two-way reply — i.e. when a containment action needs approval, or the
+> disposition is a **True Positive** escalation, or a data-source failure blocks the investigation.
+> The closing notification (see "Notifications" below) does not expect a reply and is sent WITHOUT
+> arming the bridge. When you reach
+> a reply-expecting send, arm the bridge then, self-test it, and only then send. **Do not proceed past
+> a reply-expecting send without an armed, self-tested Monitor.**
 >
 > **This host is Windows, and the bridge runs in WSL2 — NOT Windows-native, and NOT MCP polling.**
 > The Inkbox tunnel is POSIX-only and dies Windows-native (`inkbox.tunnels.connect requires a POSIX
@@ -356,10 +397,15 @@ practical case, and together with the per-run query files above removes the file
 > a real iMessage reply woke the session in ~1s.
 
 Approval and instructions come via **iMessage reply**, received through the Inkbox real-time bridge.
-Without this step, the session is **deaf to replies** and will exit without processing <ANALYST_NAME>'s
-response — and MCP polling is not a substitute, because it only runs when something makes you poll.
+When a reply is expected (containment approval or TP escalation), arming the bridge is **mandatory** —
+without it the session is **deaf to replies** and will exit without processing <ANALYST_NAME>'s response, and
+MCP polling is not a substitute because it only runs when something makes you poll. When no reply is
+expected (the end notification), do **not** arm it.
 
-### Startup sequence — runs in WSL2 as root (Windows host)
+### Arming the bridge (on demand) — runs in WSL2 as root (Windows host)
+
+Do this **only** when you are about to send a reply-expecting message — a containment approval request
+or a True Positive escalation — immediately before that send, not at the start of the ticket.
 
 1. **Start (or confirm) the gateway daemon — in WSL:**
    ```bash
@@ -390,48 +436,56 @@ response — and MCP polling is not a substitute, because it only runs when some
    `wsl.exe -u root bash -lc 'echo "{\"kind\":\"selftest\"}" >> /root/.inkbox-claude/events.jsonl'`
    → the Monitor should fire in ~1s.
 
-3. **Send the start iMessage to <ANALYST_NAME>** via `inkbox_imessage_send` (recipient `<ANALYST_PHONE>`) —
-   this is **mandatory**, not optional. It tells <ANALYST_NAME> the bridge is live for this ticket and
-   opens the reply channel so any approval/question later in the run has an existing conversation
-   to land in. Format:
-   ```
-   🔎 Triaging <TICKET-KEY> — bridge armed.
-   ```
-   (One line. Add a second line only if the ticket key isn't obvious from context — e.g. include
-   the alert title.) Do this **immediately after** the Monitor self-test succeeds, before pulling
-   the ticket.
+Once the gateway is up and the Monitor self-test fires, send your reply-expecting message
+(containment approval, TP escalation, or blocked-on-failure alert) and wait for the reply on the
+Monitor. If this is the first iMessage of the run, the send creates a new conversation; keep the
+returned `conversation_id` for subsequent messages in the same run.
 
-**All three must succeed before proceeding to step 2 (Pull the ticket).** If either fails, diagnose — do
-**NOT** silently downgrade to MCP polling. The Windows-native `~/inkbox-ai/.../inkbox-claude` and
-`/root/...` paths only work through `wsl.exe -u root`. Cold-start build detail: `references/inkbox-windows-bridge.md`.
+**Both the gateway and the Monitor must succeed before you send the reply-expecting message.** If
+either fails, diagnose — do **NOT** silently downgrade to MCP polling. The Windows-native
+`~/inkbox-ai/.../inkbox-claude` and `/root/...` paths only work through `wsl.exe -u root`. Cold-start
+build detail: `references/inkbox-windows-bridge.md`.
+
+### Notifications (end only — no bridge)
+
+The **end notification** is sent every run regardless of disposition, via `inkbox_imessage_send`
+(recipient `<ANALYST_PHONE>`). It does not expect a reply, so **do not arm the bridge/Monitor for it.**
+**No start notification is sent** — <ANALYST_NAME> learns a triage ran when he receives the end notification
+(or earlier, if the bridge was armed for a TP/blocked message mid-run).
+
+See "Teardown" below for the end notification format and sequencing.
 
 ### Teardown
 
 After the ticket is fully resolved/closed and no further replies are expected — **every session
 type, every disposition**:
 
-1. **Send the closing iMessage to <ANALYST_NAME>** via `inkbox_imessage_send` (recipient `<ANALYST_PHONE>`,
-   reuse the `conversation_id` from the start message). This is **mandatory** — it mirrors the
-   start message and tells <ANALYST_NAME> the bridge is going down and nothing is left waiting on him.
+1. **Send the end notification to <ANALYST_NAME>** via `inkbox_imessage_send` (recipient `<ANALYST_PHONE>`).
+   If the bridge was armed earlier this run (and a `conversation_id` exists from a prior send),
+   reuse it; otherwise this send creates a new conversation. This is **mandatory** — it tells <ANALYST_NAME>
+   the triage is finished and nothing is left waiting on him.
    Format:
    ```
-   ✅ <TICKET-KEY> — <final Jira state> (<disposition>). No intervention required. Bridge closing; will restart it if anything comes up. Thanks for the help.
+   ✅ <TICKET-KEY> — <final Jira state> (<disposition>). No intervention required. Thanks for the help.
    ```
-   e.g. `✅ CLTB-6310 — Completed (Benign Positive). No intervention required. Bridge closing; will
-   restart it if anything comes up. Thanks for the help.` If the ticket is left open (awaiting
-   customer confirmation, needs more data), say so in the state and what the pending action is.
+   e.g. `✅ CLTB-6310 — Completed (Benign Positive). No intervention required. Thanks for the help.`
+   If the ticket is left open (awaiting customer confirmation, needs more data), say so in the state
+   and what the pending action is. If the bridge was armed this run and is now coming down, add
+   `Bridge closing; will restart it if anything comes up.` — omit that line when the bridge was never
+   armed.
 2. **Release the one-ticket lock** (§0 → "One-ticket concurrency lock").
-3. **Stop the Monitor** armed in step 1 (`TaskStop` with its task id).
-4. **Stop the gateway** — `MSYS_NO_PATHCONV=1` is required here too, or Git Bash rewrites the
-   `/root/...` path to `C:/Program Files/Git/root/...` and the command fails with
-   `bash: line 1: C:/Program: No such file or directory` (hit 2026-09-11):
-   ```bash
-   MSYS_NO_PATHCONV=1 wsl.exe -u root bash -lc '/root/inkbox-ai/claude-code-plugin/.venv/bin/inkbox-claude stop'
-   ```
-
-Send the closing iMessage **before** stopping the gateway, not after — once the tunnel is down the
-send still works (it goes through the MCP, not the tunnel) but any reply to it will not wake the
-session, and the message should say so.
+3. **Only if you armed the bridge this run** (a containment approval or TP escalation occurred),
+   tear it down — otherwise skip to done, there is nothing to stop:
+   - **Stop the Monitor** you armed (`TaskStop` with its task id).
+   - **Stop the gateway** — `MSYS_NO_PATHCONV=1` is required here too, or Git Bash rewrites the
+     `/root/...` path to `C:/Program Files/Git/root/...` and the command fails with
+     `bash: line 1: C:/Program: No such file or directory` (hit 2026-09-11):
+     ```bash
+     MSYS_NO_PATHCONV=1 wsl.exe -u root bash -lc '/root/inkbox-ai/claude-code-plugin/.venv/bin/inkbox-claude stop'
+     ```
+   Send the end notification **before** stopping the gateway, not after — once the tunnel is down the
+   send still works (it goes through the MCP, not the tunnel) but any reply to it will not wake the
+   session, and the message should say so.
 
 ### Event handling
 
@@ -467,14 +521,20 @@ title>"`) or `getPagesInConfluenceSpace`. The folder is organized by detection f
 Email, Endpoint, AWS, Cloud Apps) — search across all subfolders by CQL title match rather than
 browsing one subfolder at a time.
 
-- **If a matching IIRR page exists** → pull it (`getConfluencePage`) and use its *Investigation
-  playbook* and *Reusable classification logic* as the playbook for this triage. Read its
-  **`# Cases seen` ledger** first: it lists every prior ticket of this type with its outcome and the
-  evidence that decided it, so you can see at a glance whether this case looks like one already
-  ruled on. It encodes how this exact detection was ruled before — a consistency anchor (like
-  checking sibling incidents' prior classifications). It **informs**, it does not replace: still
-  confirm against live data, and note if this case diverges from the prior ruling and why. If a
-  ledger row's detail matters, open that ticket — the page deliberately doesn't hold it.
+- **If a matching IIRR page exists** → pull **one** page (`getConfluencePage`) and use its
+  *Investigation playbook* and *Reusable classification logic* as the playbook for this triage.
+  **If the search returns multiple pages for the same detection type** (e.g. an original and a "(2)"
+  continuation), **pull only the most recently modified one** and **warn <ANALYST_NAME> in chat** (not
+  iMessage) that multiple IIRR pages exist for this detection type, listing their titles and last-
+  modified dates so he can decide whether the older one should be consulted. Do not pull the second
+  page unless <ANALYST_NAME> asks — a single IIRR page can be 50KB+, and loading two doubles the context
+  cost for no investigative gain in the common case.
+  Read the page's **`# Cases seen` ledger** first: it lists every prior ticket of this type with its
+  outcome and the evidence that decided it, so you can see at a glance whether this case looks like
+  one already ruled on. It encodes how this exact detection was ruled before — a consistency anchor
+  (like checking sibling incidents' prior classifications). It **informs**, it does not replace:
+  still confirm against live data, and note if this case diverges from the prior ruling and why. If
+  a ledger row's detail matters, open that ticket — the page deliberately doesn't hold it.
 - **If none exists** → proceed normally. You will create one at step 11 so the next analyst has it.
 
 ## 4. Confirm access (terminal login) — before running any queries
@@ -681,9 +741,15 @@ case stays consistent with how the family was ruled before.
 - **Jira comment** via `addCommentToJiraIssue`: verdict, each supporting check, and the **log
   scope examined** (naming the tables lets a reviewer see what was *not* looked at). Read current
   field values before overwriting them.
+  - **No internal attribution on customer-facing records.** Never add a line naming Claude, the
+    skill, the automation, or the command that produced the comment — no "Triaged via Claude", no
+    "via /triage-ticket", no "generated by the skill", no tool names as a byline. The comment is the
+    SOC analyst's record and must read as such. This applies to **every** written record: the Jira
+    comment body, the Sentinel `classificationComment`, and Sentinel incident comments. State the
+    verdict and evidence only; end on the finding, not on how it was produced.
 - **Jira transition** via `transitionJiraIssue`: "Resolve" → Completed/Resolved for a close;
   "Investigate" → Work in progress when awaiting confirmation.
-- **Confluence IIRR page**, built from `references/incident-record-template.md`, created/updated
+- **Confluence IIRR page**, built from `references/iirr-conventions.md`, created/updated
   **inside the appropriate subfolder of "Claude Decisions History"** (space <ANALYST_NAME>). Place
   the page in the subfolder matching its detection family: **Identity** (`<FOLDER_ID_IDENTITY>`), **Email**
   (`<FOLDER_ID_EMAIL>`), **Endpoint** (`<FOLDER_ID_ENDPOINT>`), **AWS** (`<FOLDER_ID_AWS>`), or **Cloud Apps** (`<FOLDER_ID_CLOUDAPPS>`).
@@ -722,8 +788,12 @@ this case didn't need it. The page gains generality; it never loses coverage.
      recommended containment — session revocation, token audit, password reset, persistence sweep).
   2. Complete all autonomous steps first: Jira comment, Jira transition, Confluence update, Sentinel
      incident close.
-  3. **Send an escalation iMessage to <ANALYST_NAME>** via Inkbox (`inkbox_imessage_send`), recipient
-     `<ANALYST_PHONE>`. The message must be a short alert summary — one text block, no attachments:
+  3. **Arm the bridge now** (§1 → "Arming the bridge") — a TP escalation expects a reply, so the
+     gateway + Monitor must be up and self-tested before you send. Then **send an escalation iMessage
+     to <ANALYST_NAME>** via Inkbox (`inkbox_imessage_send`), recipient `<ANALYST_PHONE>`. If a
+     `conversation_id` exists from a prior send this run, reuse it; otherwise this creates a new
+     conversation. The message must be a short alert summary — one
+     text block, no attachments:
      ```
      🚨 TP Escalation — <TICKET-KEY>
      Alert: <alert title>
@@ -743,15 +813,16 @@ this case didn't need it. The page gains generality; it never loses coverage.
        just wait. When <ANALYST_NAME> responds ("go", "approved", "yes", or specific instructions), execute
        accordingly. If <ANALYST_NAME> declines, skip the containment and note it in the Jira comment.
      - **Non-interactive session (`claude -p`):** the iMessage sent above is the approval
-       request. **Wait for <ANALYST_NAME>'s iMessage reply via the Monitor** armed in step 1. The Monitor
-       will fire when a new line appears in `events.jsonl`. Parse the inbound event's `body` for
+       request. **Wait for <ANALYST_NAME>'s iMessage reply via the Monitor** you armed for this escalation
+       (§1). The Monitor will fire when a new line appears in `events.jsonl`. Parse the inbound event's `body` for
        <ANALYST_NAME>'s instruction ("go", "approved", "yes", "close it", or specific instructions). Reply
        via `inkbox_imessage_send` (using `conversation_id` from the event's `meta`) to confirm
        what was executed. If <ANALYST_NAME> declines, skip the containment, note it in the Jira comment,
        and reply via iMessage confirming no action was taken.
 - **False / Benign Positive** → close per workflow; raise the tuning/allow-list recommendation
-  separately. Then run the **step 1 teardown in full** (closing iMessage → release the one-ticket
-  lock → stop the Monitor → stop the gateway) and exit. The closing iMessage is mandatory in every
+  separately. No bridge is armed for these (no reply expected). Then run the **step 1 teardown**
+  (end notification → release the one-ticket lock; stop the Monitor/gateway **only if you armed the
+  bridge earlier this run**) and exit. The end notification is mandatory in every
   session type; in `claude -p` runs it is also the only way the outcome reaches <ANALYST_NAME> without
   opening Jira, so include the one-line reason there.
 - **Malware / PUA detection** → before closing, **trigger a full antivirus scan** on the affected
@@ -761,7 +832,7 @@ this case didn't need it. The page gains generality; it never loses coverage.
 
 ## 13. Client-specific rules
 
-- **CLTB / Client B** → **Never use the MS Graph Enterprise MCP for CLTB / CLTB** — it is a Client A-only connector; CLTB is a
+- **CLTB / Client B** → **Never use the MS Graph Enterprise MCP for CLTB** — it is a Client A-only connector; CLTB is a
   different tenant. CLTB identity work (sign-in logs, user lookups) goes through **terminal KQL**
   against the CLTB `<CLTB_WORKSPACE_NAME>` workspace (`SigninLogs`, `IdentityInfo`).
 - **CLTA / Client A** → for **any identity-information request** (last sign-in / last interactive
@@ -780,7 +851,9 @@ this case didn't need it. The page gains generality; it never loses coverage.
 
 - **Reading / investigating** — KQL queries, Graph MCP lookups, pulling logs, reading Jira/Confluence,
   any data retrieval. Always proceed proactively.
-- **Jira comments** — post public (`jsdPublic:true`). No approval needed.
+- **Jira comments** — post public (`jsdPublic:true`). No approval needed. **Never include internal
+  attribution** (no "Triaged via Claude", "/triage-ticket", "generated by the skill", or tool-name
+  byline) — same rule for the Sentinel `classificationComment` and incident comments. See step 11.
 - **Jira transitions** — resolve, close, move to in-progress. No approval needed regardless of
   disposition.
 - **Confluence pages** — create new IIRR pages or update existing ones. No approval needed.
@@ -792,8 +865,8 @@ this case didn't need it. The page gains generality; it never loses coverage.
   3. For `TruePositive` classification, `classificationReason` is **required** — use
      `"SuspiciousActivity"`.
   4. URL: `https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/incidents/{id}?api-version=2024-03-01`
-  5. Use the workspace resource path (not the customerId) — CLTA: sub `e7f1dc6b`, RG `<CLTA_RESOURCE_GROUP>`,
-     workspace `<CLTA_WORKSPACE_NAME>`; CLTB: sub `82f39d90`, RG `<CLTB_RESOURCE_GROUP>`, workspace `<CLTB_WORKSPACE_NAME>`.
+  5. Use the workspace resource path (not the customerId) — CLTA: sub `<CLTA_SUBSCRIPTION_ID>`, RG `<CLTA_RESOURCE_GROUP>`,
+     workspace `<CLTA_WORKSPACE_NAME>`; CLTB: sub `<CLTB_SUBSCRIPTION_ID>`, RG `<CLTB_RESOURCE_GROUP>`, workspace `<CLTB_WORKSPACE_NAME>`.
   6. **Channel — CLTA: run both the GET (step 1) and the PUT (step 2) through the incident-lifecycle
      SP wrapper `scripts/incident-api.ps1` (`-Method get`, then `-Method put … -BodyFile <close.json>`),
      NOT the admin `az`** (see §0 → "CLTA Sentinel incidents"). **CLTB: admin `az rest`** as above (no
@@ -806,34 +879,40 @@ this case didn't need it. The page gains generality; it never loses coverage.
 
 - **Containment / remediation actions** — password resets, session revocation, account disable,
   email purge/ZAP, blocking rules, antivirus scan triggers, or **any action that changes the state
-  of a user, device, mailbox, or security control**. Send an iMessage notification via Inkbox, then:
+  of a user, device, mailbox, or security control**. This is a reply-expecting send, so **arm the
+  bridge now** (§1 → "Arming the bridge") before the iMessage. Send the iMessage notification via
+  Inkbox, then:
   - **Interactive (Desktop):** print the recommendation in the chat and wait for <ANALYST_NAME> to respond
     in the conversation. Do not poll or proceed autonomously.
-  - **Non-interactive (`claude -p`):** wait for <ANALYST_NAME>'s iMessage reply via the Monitor (step 1).
-    Parse the reply, execute accordingly, and confirm back via iMessage.
+  - **Non-interactive (`claude -p`):** wait for <ANALYST_NAME>'s iMessage reply via the Monitor you just
+    armed (§1). Parse the reply, execute accordingly, and confirm back via iMessage.
 - **Credential entry / authentication** — never enter credentials/passwords or complete a sign-in.
   If an `az` token is expired, send an iMessage notification and wait for <ANALYST_NAME> to re-authenticate.
 
 ### iMessage notifications (via Inkbox)
 
 Send an iMessage to <ANALYST_NAME> (`<ANALYST_PHONE>`) via `inkbox_imessage_send` whenever:
+- **Triage ends** — the end notification (§1 → "Notifications"). This does **not** expect a reply,
+  so do **not** arm the bridge for it.
 - **True Positive** disposition is reached (escalation + containment recommendation).
 - **Human approval is needed** for a containment action.
 - **The skill is blocked** and cannot proceed without human input (auth expired, ambiguous situation,
-  missing data only <ANALYST_NAME> can provide).
+  missing data only <ANALYST_NAME> can provide, data-source failure like Confluence/Jira MCP unreachable
+  after retries or SP auth expired).
 
-> **Arm the Monitor whenever the message expects a reply — every session type, no exceptions.** Any
-> of the sends above expects a reply, so the real-time bridge (step 1) must be armed and self-tested
-> before or at the moment you send. This applies in interactive Claude Desktop just as much as in
-> `claude -p` — never send a reply-expecting iMessage with no armed Monitor.
+> **Arm the Monitor whenever the message expects a reply — every session type, no exceptions.** The
+> TP / approval / blocked sends above expect a reply, so the real-time bridge (§1 → "Arming the
+> bridge") must be armed and self-tested before or at the moment you send. This applies in interactive
+> Claude Desktop just as much as in `claude -p` — never send a reply-expecting iMessage with no armed
+> Monitor. The end notification is the exception: no reply expected, no bridge.
 
-In **interactive (Desktop)** sessions, the iMessage is a notification — it tells <ANALYST_NAME> to come to
-the Claude Code conversation. The approval can happen in the chat, but because the reply may instead
-come back over iMessage, the Monitor must be armed so either path wakes the session.
+In **interactive (Desktop)** sessions, a reply-expecting iMessage is a notification — it tells <ANALYST_NAME>
+to come to the Claude Code conversation. The approval can happen in the chat, but because the reply
+may instead come back over iMessage, the Monitor must be armed so either path wakes the session.
 
 In **non-interactive (`claude -p`)** sessions, the iMessage is the approval channel itself. The
-session waits for <ANALYST_NAME>'s iMessage reply via the Monitor armed in step 1. Always reply via
-`inkbox_imessage_send` (with `conversation_id` from the inbound event) to confirm what was done.
+session waits for <ANALYST_NAME>'s iMessage reply via the Monitor you armed for that send (§1). Always reply
+via `inkbox_imessage_send` (with `conversation_id` from the inbound event) to confirm what was done.
 
 ### Always prohibited
 

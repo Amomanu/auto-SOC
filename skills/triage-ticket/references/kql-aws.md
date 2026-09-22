@@ -66,6 +66,28 @@ AWSCloudTrail
 | order by TimeGenerated asc
 ```
 
+### SAML identity-provider updates (`UpdateSAMLProvider` — golden-SAML / SSO propagation)
+Rule "SAML update identity provider" fires on any successful `UpdateSAMLProvider`, blind to the
+caller. In an AWS Org running IAM Identity Center, `sso.amazonaws.com` emits this against every
+member account's `AWSSSO_<hash>_DO_NOT_DELETE` managed provider whenever an admin reprovisions
+permission sets / changes SSO config — a one-per-account burst in ~2 min. Roll up by caller and
+target; then trace the human admin whose provisioning triggered it (CLTB-6451: 19 events, all
+`invokedBy=sso.amazonaws.com`, benign).
+```kusto
+AWSCloudTrail
+| where TimeGenerated > ago(4d)
+| where EventName == "UpdateSAMLProvider"
+| extend rp = parse_json(RequestParameters)
+| summarize Count=count(), First=min(TimeGenerated), Last=max(TimeGenerated),
+    Errors=countif(isnotempty(ErrorCode))
+    by UserIdentityArn, UserIdentityType, UserIdentityInvokedBy, SourceIpAddress,
+       SAMLProvider=tostring(rp.sAMLProviderArn)
+| order by Count desc
+```
+Benign when every event is `invokedBy=sso.amazonaws.com` against `AWSSSO_*_DO_NOT_DELETE` providers.
+Escalate (golden-SAML persistence) when a real human `SourceIpAddress`/off-service IAM principal
+updates a provider — especially a non-managed one, or chained with other IAM changes.
+
 ## Traps (AWS-specific)
 
 | Trap | Symptom | Workaround |

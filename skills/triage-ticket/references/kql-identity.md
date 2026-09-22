@@ -90,7 +90,7 @@ SigninLogs
     by IPAddress, Loc, OS, Br, Trust
 | order by Count desc
 ```
-Compare the IPv6 **`/64`** (e.g. `2603:3003:1db7:8100::/64`), not the full address — privacy
+Compare the IPv6 **`/64`** (e.g. `2001:db8:1234:5600::/64`), not the full address — privacy
 addressing rotates the host portion on the same subscriber line, so a "new" address in a known
 `/64` is normally the same machine.
 
@@ -253,10 +253,10 @@ AuditLogs
 - Risk state: `/identityProtection/riskyUsers?$filter=id in ('<ID1>','<ID2>')&$select=id,userDisplayName,riskLevel,riskState,riskDetail`.
 - Baseline the source IP: `/beta/auditLogs/signIns?$filter=userId eq '<ID>'&$select=createdDateTime,appDisplayName,ipAddress,location,riskState,riskLevelDuringSignIn&$orderby=createdDateTime desc` — confirm the registration-time sign-ins are non-risky and from the account's habitual geography.
 
-**Found (CLTA-38623):** two privileged accounts (`jetringerx@` Global Admin, `clinnerx@` User/Groups/
+**Found (CLTA-38623):** two privileged accounts (`admin1@` Global Admin, `admin2@` User/Groups/
 Power Platform Admin) each registered a FIDO2 passkey via Microsoft Authenticator; **every** audit row
-was self-initiated (`initiatedBy.user == target`), from the owner's baseline Wisconsin residential IP,
-risk state `none`/confirmedSafe. Corey also deleted an old iPhone-XS Authenticator + a software-OATH
+was self-initiated (`initiatedBy.user == target`), from the owner's baseline home residential IP,
+risk state `none`/confirmedSafe. One of them also deleted an old iPhone-XS Authenticator + a software-OATH
 token in the same session. → Benign Positive.
 
 ### Conditional Access policy exclusion change (CA-exclusion-change alerts)
@@ -298,6 +298,7 @@ Rogue Countries" `excludeUsers`; clean US session, no post-change foreign sign-i
 | `LocationDetails` is a **string** in `AADNonInteractiveUserSignInLogs` | `tostring(LocationDetails.countryOrRegion)` on that table → `SEM0070 … source must be scalar of type 'dynamic'` | `extend L = parse_json(LocationDetails)` first, then `tostring(L.countryOrRegion)` — the non-interactive table stores it as a JSON string, not a dynamic |
 | MFA sub-status misread as access | `userPassedMFADrivenByRiskBasedPolicy` read as "logged in" | Read the final `ResultType`; a non-zero result (e.g. `70045`) means no token was issued despite the MFA pass |
 | `has` misses substrings in a UPN | `Actor has "smith"` returns **zero rows** — `has` matches whole tokens, and `jsmith@example.com` tokenises to `jsmith`/`example`/`com` | Use `contains` for partial matches inside UPNs/emails; reserve `has` for whole-word matches (e.g. a display name in `TargetResources`) |
+| `==` on a UPN is case-sensitive | `where UserPrincipalName == "Svc_Report_Admin@…"` returns **zero rows** though the account is highly active — `SigninLogs`/`AADNonInteractiveUserSignInLogs` store the UPN lowercased, while `AuditLogs`/`IdentityInfo` preserve the original casing (so a UPN that matches there still misses in the sign-in tables) | Key sign-in queries on the **object id** (`UserId == "<guid>"`) resolved from `IdentityInfo`, or use `=~`. An unvalidated empty "no sign-ins" here reads as "no baseline / can't confirm origin" and can wrongly push a benign self-service change toward escalation (CLTB-6525) |
 | `OperationName` truncates | Truncated column can't distinguish a PIM activation from a permanent assignment | `summarize count() by OperationName` on its own so it renders full width |
 | Role name not in `modifiedProperties` | PIM role events carry only `TemplateId` / `RoleDefinitionOriginId` / `RoleDefinitionOriginType` | Expand `TargetResources`, read the entry where `type == "Role"`; resolve template GUIDs from the data, never from memory |
 | `InitiatedBy` needs double conversion | `InitiatedBy.user.userPrincipalName` may not resolve | `tostring(parse_json(tostring(InitiatedBy)).user.userPrincipalName)` |

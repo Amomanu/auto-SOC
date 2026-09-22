@@ -24,7 +24,7 @@ skills/triage-ticket/
     kql-aws.md              # KQL cookbook: AWS CloudTrail API-activity detections
     kql-endpoint.md         # KQL cookbook: Endpoint LOLBin / image-load / Defender exclusion
     kql-cloudapps.md        # KQL cookbook: MDCA OAuth-app / activity anomaly
-    incident-record-template.md  # Confluence IIRR page structure
+    iirr-conventions.md          # IIRR record conventions (structure + ledger/body rule)
 
 scripts/
   Get-SentinelIncident.ps1  # PowerShell bridge — read a Sentinel incident via az REST
@@ -79,6 +79,7 @@ Edit `skills/triage-ticket/SKILL.md` and replace the placeholder values in the *
 | `<CLTA_WORKSPACE_ID>`, `<CLTB_WORKSPACE_ID>` | Log Analytics workspace customer IDs |
 | `<CONFLUENCE_SPACE_ID>` | Your Confluence personal space ID |
 | `<ANALYST_NAME>` | Your name |
+| `<INKBOX_MCP_ID>`, `<ATLASSIAN_MCP_ID>`, `<GRAPH_MCP_ID>` | Your MCP connector instance ids (as shown by `ToolSearch`) |
 
 ### 3. Authenticate Azure CLI
 

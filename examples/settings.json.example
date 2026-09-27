@@ -1,0 +1,18 @@
+{
+  "enableWorkflows": true,
+  "autoUpdatesChannel": "latest",
+  "theme": "auto",
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true,
+  "autoMode": {
+    "environment": [
+      "### Org-wide",
+      "**Cloud provider(s)**: Azure (az CLI)",
+      "**Repository visibility**: assume private unless indicated otherwise",
+      "**Source control**: The trusted repo and its remote(s) only",
+      "### User-specific",
+      "**Primary use of Claude Code**: SOC triage — Sentinel alert investigation, Jira/Confluence documentation",
+      "**Org-specific CLIs**: az, terraform"
+    ]
+  }
+}

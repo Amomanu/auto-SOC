@@ -1,0 +1,6 @@
+tenants.json
+.env
+__pycache__/
+*.pyc
+*.tmp
+*.log

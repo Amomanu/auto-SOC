@@ -2,6 +2,8 @@
 
 An agentic, end-to-end SOC alert triage system built on [Claude](https://claude.ai). The agent autonomously pulls a Sentinel alert from Jira, investigates it via KQL and Microsoft Graph, reaches an evidence-backed disposition, closes the Sentinel incident, and writes the full decision record back to Jira + Confluence — no human in the loop unless containment is needed.
 
+**Production results:** 1,000+ incidents closed in the first three months; 99.5% of Sentinel alerts resolved end to end, the rest escalated to a human. Measured on the closed-incident data, not estimated.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/triage-flow-dark.svg">
   <img src="docs/triage-flow-light.svg" width="680" alt="Flow diagram of the triage skill: intake from Jira and Confluence, a gate on whether the Sentinel incident is still open, investigation in KQL, exactly one of four dispositions, the written record, and a human approval gate before any containment.">

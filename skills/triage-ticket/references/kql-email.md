@@ -237,5 +237,5 @@ detection is a **precursor** — it precedes MFA-fatigue/takeover or a help-desk
   `management.azure.com/.../workspaces/<CLTB_WORKSPACE_NAME>/query?api-version=2017-10-01` path.
   Full flood volume is Defender-portal only.
 
-See the **"Mail Bombing Activity Detected"** IIRR page (Claude Decisions History → Email) for the
+See the **"Mail Bombing Activity Detected"** IIRR record (IIRR store, `email/`) for the
 full parameterized playbook. First case: CLTB-6098 / incident 19791 (True Positive, no compromise).

@@ -76,7 +76,9 @@ Monitor({
 
 ## Event shape & replying
 Each inbound is one JSON line: `{"kind":"imessage","sender":"<ANALYST_PHONE>","body":"...","meta":{"conversation_id":"<CONVERSATION_ID>", ...}}`.
-Reply with `inkbox_imessage_send` (recipient `<ANALYST_PHONE>`, `conversation_id` from `meta`, `text`).
+Reply with `scripts/inkbox-send.py --text-file <file> --conversation-id <meta.conversation_id>` run in
+the WSL venv (SKILL.md §1 → "How to send"). The Inkbox MCP connector (`inkbox_imessage_send`) is no
+longer installed (2026-09-24); the script uses the same SDK + API key as the gateway.
 
 ## Gotchas
 - Monitor times out ~30–60 min even at `timeout_ms:3600000` — re-arm on the timeout notice.

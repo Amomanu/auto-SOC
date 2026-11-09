@@ -191,7 +191,7 @@ alerts (risky sign-in, AiTM, impossible travel, anomalous token); don't over-att
   consent trail). Conditional: confirmed sanctioned → Benign Positive + close; denied → contain.
 
 See the IIRR page **"Incident Investigation & Response Record: Increase in App Activity on Exchange
-(OAuth App Anomaly)"** (Confluence, Claude Decisions History → Cloud Apps) for the full playbook and
+(OAuth App Anomaly)"** (IIRR store, `cloudapps/`) for the full playbook and
 the case ledger.
 
 ---
@@ -274,7 +274,7 @@ If all sign-ins from outside known ranges are from the same geography and device
 | ResultType 70043 flood | Dozens of "failed" sign-ins look like credential attacks | 70043 = session re-auth / CAE — normal for mobile behind rotating proxies |
 
 See the IIRR page **"Incident Investigation & Response Record: Activity from an Anonymous Proxy
-(MDCA)"** (Confluence, Claude Decisions History → Cloud Apps) for the full playbook and case ledger.
+(MDCA)"** (IIRR store, `cloudapps/`) for the full playbook and case ledger.
 
 ---
 
@@ -410,4 +410,4 @@ a `union` with `extend DeviceDetail.…` fails to resolve).
   post-compromise companions; the same pattern on several accounts; encryption/rename alongside.
 
 See the IIRR page **"Incident Investigation & Response Record: Mass delete involving one user"**
-(Confluence, Claude Decisions History → Cloud Apps) for the playbook and case ledger.
+(IIRR store, `cloudapps/`) for the playbook and case ledger.

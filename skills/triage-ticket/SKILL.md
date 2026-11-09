@@ -1,6 +1,6 @@
 ---
 name: triage-ticket
-description: Triage a SOC / Microsoft Sentinel alert end-to-end — pull the ticket from Jira (MCP), check Confluence for a prior record, run KQL from the terminal (az rest → Log Analytics API) to gather evidence (sign-in logs, Defender tables, CloudTrail), reach an evidence-backed disposition, and produce the Jira comment + transition and the Confluence IIRR page. Use whenever the user says "triage this", pastes a Sentinel/Jira alert, gives a ticket key (CLTB-#### or CLTA-####), or asks how to handle an incoming detection.
+description: Triage a SOC / Microsoft Sentinel alert end-to-end — pull the ticket from Jira (MCP), check the git IIRR store for a prior record, run KQL from the terminal (az rest → Log Analytics API) to gather evidence (sign-in logs, Defender tables, CloudTrail), reach an evidence-backed disposition, and produce the Jira comment + transition and the IIRR record (JSON in the <IIRR_REPO> git repo). Use whenever the user says "triage this", pastes a Sentinel/Jira alert, gives a ticket key (CLTB-#### or CLTA-####), or asks how to handle an incoming detection.
 ---
 
 # Triage Ticket
@@ -12,7 +12,10 @@ disposition, routing, and record — and a reviewer should be able to see exactl
 was not examined.
 
 **Data sources and mechanisms:**
-- **Jira** and **Confluence** → via the **Atlassian/Jira MCP** (no browser).
+- **Jira** → via the **Atlassian/Jira MCP** (no browser).
+- **IIRR records** (per-detection playbooks + case ledgers) → JSON files in the local git repo
+  `C:\Claude\<IIRR_REPO>` (private GitHub `<IIRR_REPO>`), read and written **only**
+  through `python iirr.py …` in that repo. Confluence is no longer used.
 - **CLTA (Client A) identity information** (sign-in logs, sign-in activity, risky users, user/group/
   directory lookups, directory audit logs, license/role/PIM reads) → via the **Microsoft MCP Server
   for Enterprise** (the "MS Graph Enterprise" connector), read-only against the Client A tenant.
@@ -28,11 +31,12 @@ was not examined.
   close/classify — **not** the log tables) → via the least-privilege **incident-lifecycle SP**
   wrapper `scripts/incident-api.ps1`, **not** the admin `az`. CLTA only; CLTB incident closes stay on
   admin `az`. See "CLTA Sentinel incidents" in §0.
-- **Notifications to <ANALYST_NAME>** → via **Inkbox AI** (`inkbox_imessage_send`). Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). An **end** notification is sent every run (no reply expected, no bridge).
+- **Notifications to <ANALYST_NAME>** → via **Inkbox AI** (`scripts/inkbox-send.py` in WSL — §1 → "How to send"). Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). An **end** notification is sent every run (no reply expected, no bridge).
   A **reply-expecting** message — and the WSL bridge/Monitor to catch the reply — is sent on **True
-  Positive** dispositions (escalation), whenever the skill **needs human approval or attention** to
+  Positive, compromise** dispositions (the attacker **succeeded** — escalation; **never** on a TP,
+  unsuccessful / blocked attack), whenever the skill **needs human approval or attention** to
   proceed (e.g. containment actions, auth expired, ambiguous situation), or whenever the skill **is
-  blocked by a data-source failure** it cannot work around (e.g. Confluence/Jira MCP unreachable,
+  blocked by a data-source failure** it cannot work around (e.g. Jira MCP unreachable,
   SP auth expired, Graph MCP down). Not a data source — outbound notification only.
 - **Chrome** → **last-resort fallback only**, for data that genuinely cannot be retrieved from the
   terminal or the Graph MCP. This should never happen — all investigation data is available via the
@@ -47,7 +51,8 @@ Claude Desktop sessions** — `claude -p` (non-interactive / terminal) sessions 
 
 | The lookup is… | Client | Channel |
 |---|---|---|
-| Jira or Confluence (read/comment/transition/page) | any | **Jira MCP** |
+| Jira (read/comment/transition) | any | **Jira MCP** |
+| IIRR record (find / read / update) | any | **Terminal** — `python iirr.py` in `C:\Claude\<IIRR_REPO>` |
 | KQL / any Sentinel or Defender table | **CLTA** | **log-reader SP** `scripts/kql.ps1` (not admin `az`) |
 | KQL / any Sentinel or Defender table | **CLTB** | **Terminal** (admin `az rest` → Log Analytics API) |
 | Sentinel **incident object** — read status/owner/`etag`, comments, close/classify | **CLTA** | **SP wrapper** `scripts/incident-api.ps1` (not admin `az`) |
@@ -57,7 +62,7 @@ Claude Desktop sessions** — `claude -p` (non-interactive / terminal) sessions 
 | Identity/directory info | **CLTB** | **Terminal** (`SigninLogs` / `IdentityInfo` in CLTB `<CLTB_WORKSPACE_NAME>`) |
 
 **Per-lookup decision test:**
-1. Jira or Confluence? → **Jira MCP** (never browse the client site).
+1. Jira? → **Jira MCP** (never browse the client site). IIRR record? → `iirr.py` (terminal).
 2. Identity info **and** client is **CLTA** **and** Graph MCP is available (interactive Desktop)?
    → **Graph MCP** (call `microsoft_graph_suggest_queries` first — mandatory).
 3. Everything else — including CLTA identity info in `claude -p` sessions where Graph MCP is
@@ -92,9 +97,11 @@ Companion references (read them when you reach the step that needs them):
     `DeviceImageLoadEvents`, `DeviceProcessEvents`, `DeviceNetworkEvents`, `DeviceRegistryEvents`.
   - `references/kql-cloudapps.md` — Microsoft Defender for Cloud Apps (MDCA) / "Microsoft Application
     Protection" OAuth-app or activity anomaly. Tables `OAuthAppInfo`, `GraphAPIAuditEvents`, etc.
-- `references/iirr-conventions.md` — the IIRR Confluence page structure, **and the rule for
-  when a new case earns an edit to the body versus just a ledger row.** Read it before writing to
-  Confluence, not after.
+  - `references/kql-network.md` — Azure WAF / Application Gateway / Front Door detections (e.g.
+    "Azure WAF matching for Log4j vuln"). Table `AzureDiagnostics` (WAF + access logs), plus
+    `DeviceNetworkEvents` / `DeviceLogonEvents` for the source IP's footprint elsewhere.
+- `references/iirr-conventions.md` — the IIRR record structure (JSON, git), **and the rule for
+  when a new case earns an edit.** Read it before writing a record, not after.
 
 **KQL conventions (all families — apply regardless of which cookbook you open):**
 - **Validate every zero-row negative** against a companion query that proves the table is populated
@@ -158,13 +165,12 @@ every triage run uses; the second loads conditionally when the investigation pat
 
 **Tier 1 — always load at the start (one `ToolSearch` call):**
 ```
-select:mcp__<INKBOX_MCP_ID>__inkbox_imessage_send,mcp__<ATLASSIAN_MCP_ID>__getJiraIssue,mcp__<ATLASSIAN_MCP_ID>__searchConfluenceUsingCql,mcp__<ATLASSIAN_MCP_ID>__getConfluencePage,mcp__<ATLASSIAN_MCP_ID>__addCommentToJiraIssue,mcp__<ATLASSIAN_MCP_ID>__transitionJiraIssue,mcp__<ATLASSIAN_MCP_ID>__getTransitionsForJiraIssue,mcp__<GRAPH_MCP_ID>__microsoft_graph_suggest_queries,mcp__<GRAPH_MCP_ID>__microsoft_graph_get
+select:mcp__<ATLASSIAN_MCP_ID>__getJiraIssue,mcp__<ATLASSIAN_MCP_ID>__addCommentToJiraIssue,mcp__<ATLASSIAN_MCP_ID>__transitionJiraIssue,mcp__<ATLASSIAN_MCP_ID>__getTransitionsForJiraIssue,mcp__<GRAPH_MCP_ID>__microsoft_graph_suggest_queries,mcp__<GRAPH_MCP_ID>__microsoft_graph_get
 ```
-(9 tools: Inkbox send, Jira CRUD + transitions, Confluence search + read, Graph MCP.)
+(6 tools: Jira CRUD + transitions, Graph MCP.) IIRR records need no MCP tool — they are local files read via `iirr.py`. **Inkbox is not an MCP
+tool** — iMessages go through `scripts/inkbox-send.py` (§1 → "How to send"); nothing to load.
 
 **Tier 2 — load only when needed:**
-- **`createConfluencePage`, `updateConfluencePage`** → load at step 11 only if the IIRR page needs
-  creating or updating (new detection type, or something genuinely new was learned).
 - **`Monitor`, `TaskStop`** → load only when arming the Inkbox bridge (True Positive escalation,
   containment approval, or blocked-on-human situations). Most tickets (FP/BP) never need these.
 
@@ -175,13 +181,13 @@ This split saves ~20K tokens of unused schema on routine FP/BP cases (the majori
 | Thing | Detail |
 |-------|--------|
 | Jira | `<JIRA_SITE>.atlassian.net`. Projects: **CLTB** (Client B) and **CLTA**. Use the **Jira MCP** — `getJiraIssue`, `searchJiraIssuesUsingJql`, `addCommentToJiraIssue`, `transitionJiraIssue`, `editJiraIssue`. Never browse the client's own site. |
-| Confluence | Space **<ANALYST_NAME>** (`<CONFLUENCE_SPACE_ID>`), folder **"Claude Decisions History"** — this is where the IIRR pages live and the first place to look for a prior ruling on the same error. **One page per detection type**, not per ticket: a playbook plus a `# Cases seen` ledger. The folder is organized into **subfolders by detection family**, mirroring the KQL cookbooks: **Identity** (`<FOLDER_ID_IDENTITY>`), **Email** (`<FOLDER_ID_EMAIL>`), **Endpoint** (`<FOLDER_ID_ENDPOINT>`), **AWS** (`<FOLDER_ID_AWS>`), **Cloud Apps** (`<FOLDER_ID_CLOUDAPPS>`). Use `searchConfluenceUsingCql`, `getPagesInConfluenceSpace`, `getConfluencePage`, `createConfluencePage`, `updateConfluencePage`. |
+| IIRR store | Git repo **`C:\Claude\<IIRR_REPO>`** (private GitHub `<IIRR_REPO>`; clone it there if missing). **One JSON record per detection type**, not per ticket: a playbook plus a `cases` ledger, at `iirr/<family>/<slug>.json` with `<family>` = `identity` / `email` / `endpoint` / `aws` / `cloudapps` / `network` (mirrors the KQL cookbooks). **Never read the JSON raw** (one section per line — the Read tool truncates it and a raw read costs the whole file). Use `python iirr.py find|show|add-case|set-case|set|new` from the repo root; `iirr/README.md` has the record shape. `git pull --rebase` before reading, commit + push after any write. The old Confluence "Claude Decisions History" pages are frozen (migrated 2026-09-30) — do not read or update them. |
 | Terminal — CLTA | **Tenant:** `<CLTA_TENANT_ID>` (Client A). **Subscription:** `<CLTA_SUBSCRIPTION_ID>` ("Prod"). **Signed-in as:** `<CLTA_ANALYST_UPN>`. **Workspace:** `<CLTA_WORKSPACE_NAME>` (RG `<CLTA_RESOURCE_GROUP>`), **customerId `<CLTA_WORKSPACE_ID>`**. All Sentinel, Defender, and MDO tables are streamed here — including `EmailEvents`, `UrlClickEvents`, `CloudAppEvents`, `DeviceImageLoadEvents`, etc. |
 | Terminal — CLTB | **Tenant:** `<CLTB_TENANT_ID>` (`<CLTB_DOMAIN>`). **Subscription:** `<CLTB_SUBSCRIPTION_ID>` ("Sentinel"). **Signed-in as:** `<CLTB_ANALYST_UPN>`. **Workspace:** `<CLTB_WORKSPACE_NAME>` (RG `<CLTB_RESOURCE_GROUP>`), **customerId `<CLTB_WORKSPACE_ID>`**. Populated (verified 2026-09-11): `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AuditLogs`, `IdentityInfo`, `SecurityAlert`, `SecurityIncident`, `EmailEvents`, `EmailPostDeliveryEvents`, `UrlClickEvents`, `EmailUrlInfo`. **Not** ingested: `CloudAppEvents`. |
 | Sentinel incident SP (**CLTA only**) | Least-privilege app registration **SOC-Triage-IncidentLifecycle** (appId `<CLTA_INCIDENT_SP_APP_ID>`, tenant `<CLTA_TENANT_ID>`). Custom RBAC role **"SOC Incident Lifecycle"** on `<CLTA_WORKSPACE_NAME>` — incidents read/write + comments read/write **only** (no KQL/log query, no Graph). Drive it with the wrapper **`scripts/incident-api.ps1`** (`-Method get\|put -Url <ARM incident URL> [-BodyFile <json>]`): it decrypts the client secret from `~/.soc/triage-sp.secret` (DPAPI, this machine+user only), logs in as the SP on an isolated `AZURE_CONFIG_DIR`, makes one call, and logs out. **All CLTA Sentinel incident-object operations — read incident, comments, close/classify — go through this wrapper, not the admin `az` session** (see "CLTA Sentinel incidents" below). Cert auth will replace the secret later. |
 | KQL log-reader SP (**CLTA only**) | Least-privilege app registration **SOC-Triage-LogReader** (appId `<CLTA_LOGREADER_SP_APP_ID>`, tenant `<CLTA_TENANT_ID>`). Custom RBAC role **"SOC Log Reader"** on `<CLTA_WORKSPACE_NAME>` — `workspaces/read` + `workspaces/query/*/read` **only** (run KQL / read any table; **no** incident write, **no** Graph, **no** config write). Drive it with the wrapper **`scripts/kql.ps1`** (`-QueryFile <file of RAW KQL> [-WorkspaceId <customerId>]`): it decrypts `~/.soc/triage-kql.secret` (DPAPI, this machine+user), logs in as the SP on its own isolated `AZURE_CONFIG_DIR`, POSTs the query to `api.loganalytics.io`, and logs out. **All CLTA KQL runs through this — not the admin `az` session** (see "CLTA KQL" below). Cert auth will replace the secret later. |
 | MS Graph MCP (**CLTA only**) | **Microsoft MCP Server for Enterprise** — connected in Claude Desktop as the **"MS Graph Enterprise"** custom connector. Read-only Entra identity/directory queries against the **Client A tenant** (`<CLTA_TENANT_ID>`). Tools: `microsoft_graph_suggest_queries` (**always call first — mandatory before any get**), then `microsoft_graph_get`; `microsoft_graph_list_properties` to explore schema. **Always use it for CLTA identity information whenever it can answer.** **Single-tenant — never use it for Client B / CLTB** (different tenant). |
-| Inkbox AI | **iMessage notifications** via `inkbox_imessage_send`. Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). **End notification every run** (no reply expected, no bridge). **Reply-expecting** sends — plus the WSL bridge/Monitor armed to catch the reply — on **True Positive** dispositions (escalation), whenever the skill **needs human approval or attention** (e.g. containment actions, auth failure, ambiguous situation), or whenever the skill **is blocked by a data-source failure** it cannot work around (e.g. Confluence/Jira MCP unreachable, SP auth expired). On TP with recommended containment: arm the bridge, send the iMessage, then **wait** for <ANALYST_NAME> to respond before executing any containment action. |
+| Inkbox AI | **iMessage notifications** via **`scripts/inkbox-send.py`** run in the WSL gateway venv (§1 → "How to send") — the MCP connector is not installed. Recipient: <ANALYST_NAME> (`<ANALYST_PHONE>`). **End notification every run** (no reply expected, no bridge). **Reply-expecting** sends — plus the WSL bridge/Monitor armed to catch the reply — on **True Positive** dispositions (escalation), whenever the skill **needs human approval or attention** (e.g. containment actions, auth failure, ambiguous situation), or whenever the skill **is blocked by a data-source failure** it cannot work around (e.g. Jira MCP unreachable, SP auth expired). On TP with recommended containment: arm the bridge, send the iMessage, then **wait** for <ANALYST_NAME> to respond before executing any containment action. |
 | Analyst | <ANALYST_NAME> (SOC). |
 
 ### CLTA Sentinel incidents — use the incident-lifecycle service principal (not your admin)
@@ -203,12 +209,12 @@ This split saves ~20K tokens of unused schema on routine FP/BP cases (the majori
   `https://management.azure.com/subscriptions/<CLTA_SUBSCRIPTION_ID>/resourceGroups/<CLTA_RESOURCE_GROUP>/providers/Microsoft.OperationalInsights/workspaces/<CLTA_WORKSPACE_NAME>/providers/Microsoft.SecurityInsights/Incidents/<GUID>?api-version=2024-03-01`
 - **Read the incident:**
   ```
-  pwsh -File scripts/incident-api.ps1 -Method get -Url "<incident ARM URL>"
+  pwsh -File C:/Users/<USER>/.claude/skills/triage-ticket/scripts/incident-api.ps1 -Method get -Url "<incident ARM URL>"
   ```
 - **Close / reopen:** GET the incident for a fresh `etag`, write the PUT body to the per-run temp
   file (etag + `properties.status` + `severity` + `title` + classification fields), then:
   ```
-  pwsh -File scripts/incident-api.ps1 -Method put -Url "<incident ARM URL>" -BodyFile "C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\close.json"
+  pwsh -File C:/Users/<USER>/.claude/skills/triage-ticket/scripts/incident-api.ps1 -Method put -Url "<incident ARM URL>" -BodyFile "C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/close.json"
   ```
 - **Comment:** PUT to `<incident URL without api-version>/comments/<new-guid>?api-version=2024-03-01`
   with `-BodyFile` holding `{"properties":{"message":"…"}}`.
@@ -232,14 +238,22 @@ table — runs through the least-privilege log-reader SP via **`scripts/kql.ps1`
      body itself).
   2. `Bash`/`PowerShell` tool:
      ```
-     pwsh -File scripts/kql.ps1 -QueryFile "C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\qN.kql"
+     pwsh -File C:/Users/<USER>/.claude/skills/triage-ticket/scripts/kql.ps1 -QueryFile "C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/qN.kql"
      ```
      Defaults to the CLTA workspace (`<CLTA_WORKSPACE_ID>`). Returns `{ "tables":[{ "columns":[...], "rows":[...] }] }`.
+     **Paths in commands: always absolute, always forward slashes.** The wrapper path is absolute so
+     the call works from any cwd (the Bash cwd is usually `C:\Claude`, where `scripts/…` doesn't
+     exist). `-QueryFile` / `-BodyFile` use `C:/…/` forward slashes: in Bash, a backslash before a
+     variable escapes it (`"…b7e2\$q.kql"` reaches pwsh as the literal `…b7e2$q.kql` → file not
+     found; CLTA-39891). pwsh accepts forward slashes. To run several queries in one call:
+     `for q in q3 q4; do pwsh -File C:/Users/<USER>/.claude/skills/triage-ticket/scripts/kql.ps1 -QueryFile "C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/$q.kql"; done`.
+     To print the rows compactly, pipe to
+     `python -c "import json,sys;t=json.load(sys.stdin)['tables'][0];print([c['name'] for c in t['columns']]);[print(r) for r in t['rows']]"`.
 - **Why `pwsh`, not `powershell`:** Windows PowerShell 5.1 decorates `Get-Content -Raw` output with
   note-properties that corrupt the JSON body; the wrapper reads with `[IO.File]::ReadAllText` to be
   safe either way, but standardise on `pwsh`.
 - **Large results** (e.g. `SecurityAlert.Entities`): redirect to the per-run file and read it —
-  `pwsh -File scripts/kql.ps1 -QueryFile "…\qN.kql" > "…\result.json"`.
+  `pwsh -File C:/Users/<USER>/.claude/skills/triage-ticket/scripts/kql.ps1 -QueryFile "C:/…/qN.kql" > "C:/…/result.json"`.
 - **The per-run temp dir + one-ticket lock rules below still apply** — one `.kql` file per query,
   unique per-run directory, never a shared name.
 - **Auth is unattended** — `kql.ps1` logs in/out itself. On `AADSTS7000215` / invalid secret,
@@ -311,7 +325,7 @@ az rest ... > C:/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/result.j
 ### One-ticket concurrency lock — before running any queries
 
 A second session working the **same ticket** is a separate hazard from the temp-file clobber: both
-runs duplicate the investigation and can post conflicting Jira/Sentinel/Confluence records. Take a
+runs duplicate the investigation and can post conflicting Jira/Sentinel/IIRR records. Take a
 cooperative advisory lock keyed on the ticket, **once, right after step 4 (terminal login) and before
 the first query**. Lock file (fixed name, one per ticket):
 
@@ -325,7 +339,7 @@ C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>.lock
    - Exists with `"status":"held"` and `utc` **within the last 30 min** → another live session owns
      this ticket. **Do not proceed:** interactive Desktop — stop and tell <ANALYST_NAME> which run (`run`
      token) holds it; `claude -p` — iMessage <ANALYST_NAME> (e.g. "CLTB-6143 already being triaged by run
-     `<rand>`, exiting") and exit **without touching Jira/Sentinel/Confluence**.
+     `<rand>`, exiting") and exit **without touching Jira/Sentinel/IIRR**.
    - Exists with `"status":"held"` but `utc` **older than 30 min** → stale (a crashed run). Reclaim.
 2. **Acquire:** `Write` the lock file with your run token and the current UTC:
    ```
@@ -345,11 +359,39 @@ practical case, and together with the per-run query files above removes the file
    "Notifications" below). This is fire-and-forget; <ANALYST_NAME> is not expected to reply, so the WSL
    bridge/Monitor is **NOT** armed for it. **No start notification is sent.**
 2. **The real-time bridge/Monitor — on demand only.** Arm the WSL bridge + Monitor **only** when the
-   run needs a reply from <ANALYST_NAME>: a **containment action that needs approval**, a **True Positive
-   escalation**, or a **data-source failure** the skill cannot work around (e.g. Confluence/Jira MCP
+   run needs a reply from <ANALYST_NAME>: a **containment action that needs approval** on a compromise, a
+   **True Positive, compromise escalation** (attacker success — a blocked/unsuccessful TP does **not**
+   qualify), or a **data-source failure** the skill cannot work around (e.g. Jira MCP
    unreachable after retries, SP auth expired, Graph MCP down — anything that blocks investigation
    and needs <ANALYST_NAME> to fix). Most tickets (Benign / False Positive, no containment, no outages) never
    arm it.
+
+### How to send — `scripts/inkbox-send.py` (primary; the MCP connector is NOT required)
+
+> **Every "send via `inkbox_imessage_send`" in this skill means: send with this script.** The Inkbox
+> claude.ai connector (`mcp__<INKBOX_MCP_ID>__inkbox_imessage_send`) is **no longer installed** on the
+> account (2026-09-24, CLTB-7020/CLTB-7029: the Tier-1 ToolSearch silently returned no Inkbox tool and
+> both TP escalations were skipped). The script sends through the Inkbox Python SDK already installed
+> in the WSL gateway venv, with the API key/identity from `/root/.inkbox-claude/.env` — it works in
+> every session type and does **not** need the gateway daemon running (the daemon is only for
+> *receiving* replies).
+>
+> 1. `Write` the message text (plain UTF-8, emoji fine) to the per-run dir:
+>    `C:\Users\<USER>\AppData\Local\Temp\triage\<TICKET>-<rand>\imsg.txt`
+> 2. Send (Bash tool):
+>    ```
+>    MSYS_NO_PATHCONV=1 wsl.exe -u root /root/inkbox-ai/claude-code-plugin/.venv/bin/python /mnt/c/Users/<USER>/.claude/skills/triage-ticket/scripts/inkbox-send.py --text-file /mnt/c/Users/<USER>/AppData/Local/Temp/triage/<TICKET>-<rand>/imsg.txt
+>    ```
+>    Prints `{"sent": true, "id": …, "conversation_id": …}`. It defaults to <ANALYST_NAME>'s standing
+>    conversation `<CONVERSATION_ID>` (the shared iMessage line cannot start new
+>    conversations); pass `--conversation-id <uuid>` to reply into another one.
+> 3. **Never skip a mandated send because a tool is missing.** If the script fails, report the exact
+>    error to <ANALYST_NAME> in chat — do not silently drop the notification. If the venv is missing, rebuild it
+>    with the one-time build in "Arming the bridge" below.
+> 4. `MSYS_NO_PATHCONV=1` is mandatory (Git Bash otherwise rewrites the `/root/…` and `/mnt/c/…` paths).
+>
+> If the MCP connector is ever reinstalled and `inkbox_imessage_send` is loaded, it may be used
+> instead — but the script is the default.
 
 > **⚠️ TAIL GOTCHA — TWO independent bugs, EITHER silently kills the wake (read before arming the Monitor).**
 > Use this exact Monitor command — do not simplify it:
@@ -511,31 +553,38 @@ State plainly what the ticket does **not** contain — result codes, counts, tim
 ticket is a pointer, not evidence. Restate the facts back in 4–6 lines before pivoting. Flag
 missing critical facts as gaps rather than guessing.
 
-## 3. Check the Claude Decision History for this error type
+## 3. Check the IIRR store for this error type
 
-Before running any queries, search the Confluence space (<ANALYST_NAME>) → **Claude Decisions
-History** folder for an existing record whose title/subject matches the ticket's **error / alert
-title** (e.g. "Privilege escalation via CloudFormation policy") or its detection/rule name. Use
-`searchConfluenceUsingCql` (CQL, e.g. `space = "<CONFLUENCE_SPACE_ID>" AND title ~ "<alert
-title>"`) or `getPagesInConfluenceSpace`. The folder is organized by detection family (Identity,
-Email, Endpoint, AWS, Cloud Apps) — search across all subfolders by CQL title match rather than
-browsing one subfolder at a time.
+Before running any queries, look for an existing record whose title matches the ticket's **error /
+alert title** (e.g. "Privilege escalation via CloudFormation policy") or its detection/rule name.
+From the repo root `C:\Claude\<IIRR_REPO>`:
 
-- **If a matching IIRR page exists** → pull **one** page (`getConfluencePage`) and use its
-  *Investigation playbook* and *Reusable classification logic* as the playbook for this triage.
-  **If the search returns multiple pages for the same detection type** (e.g. an original and a "(2)"
-  continuation), **pull only the most recently modified one** and **warn <ANALYST_NAME> in chat** (not
-  iMessage) that multiple IIRR pages exist for this detection type, listing their titles and last-
-  modified dates so he can decide whether the older one should be consulted. Do not pull the second
-  page unless <ANALYST_NAME> asks — a single IIRR page can be 50KB+, and loading two doubles the context
-  cost for no investigative gain in the common case.
-  Read the page's **`# Cases seen` ledger** first: it lists every prior ticket of this type with its
-  outcome and the evidence that decided it, so you can see at a glance whether this case looks like
-  one already ruled on. It encodes how this exact detection was ruled before — a consistency anchor
-  (like checking sibling incidents' prior classifications). It **informs**, it does not replace:
-  still confirm against live data, and note if this case diverges from the prior ruling and why. If
-  a ledger row's detail matters, open that ticket — the page deliberately doesn't hold it.
+```
+git pull --rebase --autostash -q
+python iirr.py find "<alert title>"
+```
+
+`find` prints up to five matches as `score | file | title | cases | last seen`, or `NO MATCH`. Titles
+are not always the exact Sentinel alert name, so read the candidates; if nothing matches, retry once
+with the rule/detector name or the distinctive words of the title before concluding there is no record.
+
+- **If a matching record exists** → print it once with `python iirr.py show <file>` and use its
+  playbook and classification sections as the playbook for this triage. `show` prints the ledger,
+  intro and core sections and **skips** `reference_data`, `checklist`, `tooling` and `summary`
+  (lookup-only or duplicated) — that is deliberate, a full record can be 50KB+. Add
+  `--with reference_data` only when the ledger shows this subject, host or IP has been seen before and
+  the earlier values matter. **If `find` returns two plausible records** (e.g. the ZAP-success and
+  ZAP-failure siblings), pick the one whose title matches the alert and mention the other in chat; do
+  not load both.
+  Read the **`cases` ledger** first: it lists every prior ticket of this type with its outcome and
+  the evidence that decided it, so you can see at a glance whether this case looks like one already
+  ruled on. It encodes how this exact detection was ruled before — a consistency anchor (like checking
+  sibling incidents' prior classifications). It **informs**, it does not replace: still confirm
+  against live data, and note if this case diverges from the prior ruling and why. If a ledger row's
+  detail matters, open that ticket — the record deliberately doesn't hold it.
 - **If none exists** → proceed normally. You will create one at step 11 so the next analyst has it.
+- **If the repo is missing or `git pull` fails** → read the local copy if present and say so in chat;
+  a stale playbook is still usable. Do not fall back to Confluence.
 
 ## 4. Confirm access (terminal login) — before running any queries
 
@@ -591,7 +640,7 @@ SecurityIncident
   4. **Close the paired Sentinel incident** if it isn't already fully resolved (per standing rule:
      closing Jira → close Sentinel). **CLTA: via the SP wrapper; CLTB: via admin `az`** (see the
      closure guardrail).
-  5. **Stop.** Report the outcome to <ANALYST_NAME> and end the triage — no Confluence update, no KQL, no
+  5. **Stop.** Report the outcome to <ANALYST_NAME> and end the triage — no IIRR update, no KQL, no
      further steps.
 
 ## 6. Query the incident and identify the detecting product
@@ -620,6 +669,25 @@ SecurityAlert
 | project AlertName, Entities
 ```
 
+`Entities` is stored as a **string**, not dynamic — `mv-expand Entities` fails with `SEM0447`
+("expanded expression expected to have dynamic type"). Wrap it in `parse_json()`. To pull just the
+host/account/IP entities without dumping the whole column:
+
+```kusto
+SecurityIncident
+| where IncidentNumber == <number>
+| summarize arg_max(TimeGenerated, AlertIds)
+| mv-expand AlertIds
+| extend AlertId = tostring(AlertIds)
+| join kind=inner (SecurityAlert | where TimeGenerated > ago(7d)
+    | project SystemAlertId, AlertName, CompromisedEntity, Entities) on $left.AlertId == $right.SystemAlertId
+| mv-expand e = parse_json(Entities)
+| extend T = tostring(e.Type)
+| where T in ("host", "account", "ip", "mailbox", "url")
+| project AlertName, CompromisedEntity, T, HostName = tostring(e.HostName), AccName = tostring(e.Name),
+          UPNSuffix = tostring(e.UPNSuffix), Address = tostring(e.Address), Url = tostring(e.Url)
+```
+
 Find which product actually fired:
 
 - **Microsoft Defender for Cloud Apps (MDCA) activity policy** → a pure *volume counter*. Its
@@ -636,6 +704,7 @@ self-contained), and read it when you reach step 8:
 - AWS-sourced rule (IAM privilege escalation, security-group change, CloudTrail tampering) → `references/kql-aws.md`
 - Endpoint / Defender-XDR LOLBin behavior (regsvr32/rundll32 abnormal-extension image loads, suspicious DLL/image loads, LOLBin execution) → `references/kql-endpoint.md`
 - Microsoft Defender for Cloud Apps (MDCA) / "Microsoft Application Protection" OAuth-app or activity anomaly (e.g. "Increase in app activity on Exchange") → `references/kql-cloudapps.md`
+- Azure WAF / Application Gateway / Front Door pattern match (Log4j, SQLi, RCE signatures on web traffic) → `references/kql-network.md`
 - A family none of these cover → work it out (references are a floor), then add a new `kql-<family>.md` per step 8.
 
 Also query for **similar/sibling incidents** — recurrence + **prior classifications** are a tuning
@@ -663,7 +732,7 @@ gets laundered into a second opinion. Note where an automated verdict's *facts* 
 Run KQL against the correct workspace — **CLTA: via `scripts/kql.ps1`** (raw-KQL file →
 `pwsh -File scripts/kql.ps1 -QueryFile …`; §0 → "CLTA KQL"); **CLTB: via admin `az rest`** (§0 →
 "Running KQL from the terminal"). Use the family cookbook you selected in step 6 (`references/kql-identity.md`,
-`kql-email.md`, `kql-aws.md`, `kql-endpoint.md`, or `kql-cloudapps.md`), plus the all-family KQL
+`kql-email.md`, `kql-aws.md`, `kql-endpoint.md`, `kql-cloudapps.md`, or `kql-network.md`), plus the all-family KQL
 conventions in the intro above.
 
 > **CLTA (Client A) identity data — use the MCP, not the terminal.** For any identity *information* on a
@@ -710,7 +779,7 @@ it can be cited in the record — the terminal output is the evidence source.
 
 ## 9. Rate severity
 
-Record **two** values, as the IIRR pages do — they legitimately diverge:
+Record **two** values, as the IIRR records do — they legitimately diverge:
 
 - **Sentinel incident severity** — as assigned by the detection (Informational / Low / Medium / High).
 - **Jira priority** — the ticket's working priority (commonly **P3**).
@@ -720,7 +789,11 @@ Record **two** values, as the IIRR pages do — they legitimately diverge:
 Every case resolves to exactly one — with a one-sentence, evidence-tied justification (never
 just "FP"):
 
-- **True Positive** — real malicious/unauthorized activity → escalate / contain (step 12).
+- **True Positive, compromise** — real malicious/unauthorized activity **that succeeded** (attacker
+  sign-in success, executed payload, data access, persistence) → escalate / contain (step 12).
+- **True Positive, unsuccessful** — real malicious activity that was **blocked** (zero attacker
+  successes, e.g. brute force / spray stopped by lockout or IP block) → close like FP/BP; hardening
+  recommendations go in the Jira comment only. **No escalation iMessage, no bridge** (step 12).
 - **False Positive** — detection fired on activity that isn't what it claims (e.g. config-code
   failures, a broad indicator matching legitimate infra) → document *why* the rule misfired;
   recommend tuning/allow-listing when the cause is overbreadth.
@@ -736,11 +809,24 @@ authorized (not inaccurate data), lean **Benign Positive** — and let the **sib
 prior classifications** (step 6) and any prior decision record (step 3) break the tie so this
 case stays consistent with how the family was ruled before.
 
-## 11. Record — Jira + Confluence
+## 11. Record — Jira + IIRR
 
 - **Jira comment** via `addCommentToJiraIssue`: verdict, each supporting check, and the **log
   scope examined** (naming the tables lets a reviewer see what was *not* looked at). Read current
   field values before overwriting them.
+  - **`tldr` flag** — if the skill was invoked with `tldr` in its arguments (e.g.
+    `/triage-ticket CLTA-39779 tldr`), post the Jira comment as a single short paragraph instead of the
+    full sectioned write-up. Only when the flag is present; the default is the full comment above.
+    Template:
+    ```
+    **<Disposition>.** <One sentence: what fired, for whom (display name + `UPN`), and where it came from (source/IP/device)>. <One sentence: the deciding evidence (result codes / key counts)>. <One sentence: the disconfirming result (successes, risk, other alerts)>. <No action required. | Recommended action: …>
+    ```
+    Example (CLTA-39779):
+    ```
+    **False Positive.** The failed sign-ins for Jane Smith (`jsmith@<CLTA_DOMAIN>`) came from her own office IP (203.0.113.50) and her Azure AD joined device. All 24 failures were token/MFA prompts (90072, 700082, 700084, 50011, 65002, 50097, 50074, 50078). There were zero wrong-password or lockout failures, 656 successful sign-ins from the same IP, and no sign-in risk. No action required.
+    ```
+    The flag changes only the Jira comment. The Sentinel `classificationComment`, the IIRR rule and
+    the end notification stay the same.
   - **No internal attribution on customer-facing records.** Never add a line naming Claude, the
     skill, the automation, or the command that produced the comment — no "Triaged via Claude", no
     "via /triage-ticket", no "generated by the skill", no tool names as a byline. The comment is the
@@ -749,44 +835,61 @@ case stays consistent with how the family was ruled before.
     verdict and evidence only; end on the finding, not on how it was produced.
 - **Jira transition** via `transitionJiraIssue`: "Resolve" → Completed/Resolved for a close;
   "Investigate" → Work in progress when awaiting confirmation.
-- **Confluence IIRR page**, built from `references/iirr-conventions.md`, created/updated
-  **inside the appropriate subfolder of "Claude Decisions History"** (space <ANALYST_NAME>). Place
-  the page in the subfolder matching its detection family: **Identity** (`<FOLDER_ID_IDENTITY>`), **Email**
-  (`<FOLDER_ID_EMAIL>`), **Endpoint** (`<FOLDER_ID_ENDPOINT>`), **AWS** (`<FOLDER_ID_AWS>`), or **Cloud Apps** (`<FOLDER_ID_CLOUDAPPS>`).
-  One page per **detection type**, never per ticket. If no prior record existed for this error type
-  (step 3), **create one now** (pass `parentId` = the subfamily folder ID) so the next analyst
-  inherits the playbook. If one existed, apply the ledger/body rule below. This is the reusable
-  deliverable, not a case log.
+- **IIRR record** (JSON, git repo `C:\Claude\<IIRR_REPO>`), built per
+  `references/iirr-conventions.md`. One record per **detection type**, never per ticket. If no prior
+  record existed for this error type (step 3), **create one now** so the next analyst inherits the
+  playbook:
+  1. `python iirr.py new <family> "<alert title>"` — `<family>` is the detection family from step 6
+     (`identity` / `email` / `endpoint` / `aws` / `cloudapps` / `network`). It prints the new file path.
+  2. `python iirr.py add-case <file> '<json>'` with `ticket`, `sentinel_incident`, `date`
+     (`YYYY-MM-DD`), `client`, `subject`, `outcome`, `deciding_evidence`.
+  3. For each section, write the text to a temp file and `python iirr.py set <file> <key> <tempfile>`.
+     Minimum: `intro`, `decides` (or `read_first` + `meaning`), `playbook`, `classification`,
+     `response`; add `traps` / `open_items` / `reference_data` when there is something to put in them.
+  If a record existed, apply the rule below. Either way, after any write:
+  `git add -A && git commit -m "<TICKET>: <what changed>" && git push` (on a push conflict,
+  `git pull --rebase` and push again; never force-push). An unpushed change has not happened for the
+  next run. This is the reusable deliverable, not a case log.
 
-### Updating an existing IIRR page — only when something new happened
+### Updating an existing IIRR record — only when something new happened
 
-**If a matching IIRR page already exists and this case is a routine repeat** — same outcome, same
+**If a matching IIRR record already exists and this case is a routine repeat** — same outcome, same
 evidence pattern, no new traps or discriminators discovered — **do not touch the IIRR at all.** No
-ledger row, no body edit, no version bump. The Jira ticket comment is the record for routine cases;
-the IIRR page is a playbook, not a case log.
+ledger row, no section edit, no commit. The Jira ticket comment is the record for routine cases;
+the IIRR record is a playbook, not a case log.
 
-**Update the IIRR only when something genuinely new happened** that the page doesn't already cover:
+**Update the IIRR only when something genuinely new happened** that the record doesn't already cover:
 a **new outcome** the fork logic doesn't handle, a **new discriminator** that separated this case
 from a prior one, a **new query / new table / new purpose**, a **new trap**, a **verdict that
-diverged** from how the page says the family is ruled, or a page claim that **didn't hold up**.
-Fold it into the *general* section it belongs in, phrased generally — never as a per-case narrative.
+diverged** from how the record says the family is ruled, or a claim in it that **didn't hold up**.
+Fold it into the *general* section it belongs in, phrased generally — never as a per-case narrative:
+`python iirr.py show <file> --only <key>` to get the current text, edit it in a temp file,
+`python iirr.py set <file> <key> <tempfile>`, and `add-case` the ticket so the change is attributed
+(`set-case <file> <ticket> '<json>'` when an existing row's outcome changes, e.g. awaiting → BP).
 
-**Never** add a second case narrative. No `# Case two` / `# Case three`, no per-case `## Case
-summary` / `## Investigation record` / `## Response actions`. Per-case detail lives in the Jira
+**Never** add a second case narrative — no per-case sections or keys. Per-case detail lives in the Jira
 ticket — anyone who needs it opens the ticket.
 
 **Never remove KQL.** Don't delete a query, trap, reference row or classification criterion because
-this case didn't need it. The page gains generality; it never loses coverage.
+this case didn't need it. The record gains generality; it never loses coverage. `set` replaces the
+whole section, so start from the current text, never from memory.
 
 > The test: *would the next analyst do anything differently because of this case?* If yes → update
-> the IIRR (body, phrased generally). If no → don't touch it.
+> the IIRR (section text, phrased generally). If no → don't touch it.
 
 ## 12. Route to the next action
 
-- **True Positive** → escalate:
+- **True Positive, unsuccessful (attack blocked, zero attacker successes)** → **do NOT escalate.**
+  Close exactly like FP/BP: Jira comment (put any precautionary / hardening recommendations — e.g.
+  password reset, legacy-auth block — in the comment as recommendations), Jira Resolve, Sentinel close
+  as `TruePositive` / `SuspiciousActivity`, IIRR per step 11. **No escalation iMessage, no bridge, no
+  approval request** — a blocked attack needs no reply from <ANALYST_NAME>. Then the normal teardown (end
+  notification only). (CLTA-39783, 2026-09-24: an escalation iMessage + bridge was wrongly sent for a
+  blocked campaign with zero successes — <ANALYST_NAME>: "if there was no success, you don't send iMessage".)
+- **True Positive, compromise (attacker succeeded)** → escalate:
   1. State the criteria met and assemble the handoff (timeline, evidence, impacted entities,
      recommended containment — session revocation, token audit, password reset, persistence sweep).
-  2. Complete all autonomous steps first: Jira comment, Jira transition, Confluence update, Sentinel
+  2. Complete all autonomous steps first: Jira comment, Jira transition, IIRR update, Sentinel
      incident close.
   3. **Arm the bridge now** (§1 → "Arming the bridge") — a TP escalation expects a reply, so the
      gateway + Monitor must be up and self-tested before you send. Then **send an escalation iMessage
@@ -849,17 +952,20 @@ this case didn't need it. The page gains generality; it never loses coverage.
 
 ### Always auto-approved (no confirmation needed)
 
-- **Reading / investigating** — KQL queries, Graph MCP lookups, pulling logs, reading Jira/Confluence,
+- **Reading / investigating** — KQL queries, Graph MCP lookups, pulling logs, reading Jira / IIRR records,
   any data retrieval. Always proceed proactively.
 - **Jira comments** — post public (`jsdPublic:true`). No approval needed. **Never include internal
   attribution** (no "Triaged via Claude", "/triage-ticket", "generated by the skill", or tool-name
   byline) — same rule for the Sentinel `classificationComment` and incident comments. See step 11.
 - **Jira transitions** — resolve, close, move to in-progress. No approval needed regardless of
   disposition.
-- **Confluence pages** — create new IIRR pages or update existing ones. No approval needed.
+- **IIRR records** — create or update records in `C:\Claude\<IIRR_REPO>` and commit + push to its
+  private GitHub remote. No approval needed. Never force-push; never write to Confluence.
 - **Sentinel incident closure** — close automatically whenever the paired Jira ticket is closed.
   **Method: PUT, not PATCH.** PATCH returns 403 Forbidden. The correct sequence:
-  1. GET the incident to retrieve its `etag`.
+  1. GET the incident to retrieve its `etag`. **Re-check `status` in that same GET** — if another
+     analyst closed it since the step-5 open-check, do NOT PUT (it overwrites their classification
+     comment); treat it as the step-5 short-circuit instead (CLTA-41320, 2026-10-22).
   2. PUT with the full body including `etag`, `properties.status = "Closed"`, `classification`,
      `classificationReason`, `classificationComment`, `severity`, `title`, `description`, `owner`.
   3. For `TruePositive` classification, `classificationReason` is **required** — use
@@ -894,10 +1000,12 @@ this case didn't need it. The page gains generality; it never loses coverage.
 Send an iMessage to <ANALYST_NAME> (`<ANALYST_PHONE>`) via `inkbox_imessage_send` whenever:
 - **Triage ends** — the end notification (§1 → "Notifications"). This does **not** expect a reply,
   so do **not** arm the bridge for it.
-- **True Positive** disposition is reached (escalation + containment recommendation).
+- **True Positive, compromise** disposition is reached — attacker **succeeded** (escalation +
+  containment recommendation). **Not** for TP, unsuccessful / blocked attacks — those get only the
+  end notification.
 - **Human approval is needed** for a containment action.
 - **The skill is blocked** and cannot proceed without human input (auth expired, ambiguous situation,
-  missing data only <ANALYST_NAME> can provide, data-source failure like Confluence/Jira MCP unreachable
+  missing data only <ANALYST_NAME> can provide, data-source failure like Jira MCP unreachable
   after retries or SP auth expired).
 
 > **Arm the Monitor whenever the message expects a reply — every session type, no exceptions.** The

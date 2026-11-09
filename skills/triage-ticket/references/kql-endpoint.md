@@ -273,3 +273,65 @@ union isfuzzy=true
   the known test hashes), empty MDC analyzer result, clean 14-day host sweep. Test/validation
   detection. Close BenignPositive / SuspiciousButExpected; optional narrow name/hash suppression.
 - **Escalate:** a real malware family name on the detector, or any follow-on alert on the host/account.
+
+## Detection family — Local Admin Group Changes (Sentinel rule over `DeviceEvents`)
+
+Sentinel scheduled rule: `DeviceEvents` `ActionType == "UserAccountAddedToLocalGroup"` with
+`GroupSid` S-1-5-32-544. The alert entity is only the host. The actor (`InitiatingProcessAccountName`/`Sid`/`LogonId`)
+and the added `AccountSid` are in the raw event. Full playbook: IIRR `endpoint/local-admin-group-changes.json`.
+
+### Query patterns
+1. **Raw event plus local-account context:** `DeviceEvents` on `<HOST>` for 7d, `ActionType in
+   ("UserAccountAddedToLocalGroup","UserAccountRemovedFromLocalGroup","UserAccountCreated","UserAccountModified","UserAccountDeleted")`.
+   Project `AccountSid, AdditionalFields, InitiatingProcessAccountName, InitiatingProcessAccountSid, InitiatingProcessLogonId`.
+2. **Entra SID → object ID:** decode `S-1-12-1-a-b-c-d` with
+   `uuid.UUID(bytes_le=struct.pack('<IIII',a,b,c,d))`, then resolve it in Graph (`users?$filter=id in(...)`).
+3. **Actor logon type and device owner:** `DeviceLogonEvents` `LogonSuccess` on `<HOST>`. Summarize over 30d by account
+   to find the primary user. Pin −3h/+30m around the event and match `LogonId` to `InitiatingProcessLogonId`.
+   Interactive means the actor was at the console. `IsLocalAdmin` flipping from False to True on the added user's next logon confirms the change took effect.
+4. **Breadth:** human admin adds tenant-wide. Filter `InitiatingProcessAccountName !endswith "$"`, because machine accounts re-apply
+   the group hourly (~27–30 adds/device/day).
+
+### Traps
+- `has` matches whole terms only: `AccountName has "smith"` misses `john.smithx`. Use `contains`/`startswith`.
+- The added account's `AccountName` is often blank (Entra user). Decode the SID; don't treat the blank as a local account.
+
+## Detection family — "Use of living-off-the-land binary to run malicious code" (MDATP, T1105)
+
+MDE alert on a LOLBin (certutil, bitsadmin, mshta…) run with suspicious parameters. One SystemAlertId is
+re-emitted with a growing EndTime as more runs match, so expect duplicate `SecurityAlert` rows. Full
+playbook: IIRR `endpoint/use-of-living-off-the-land-binary-to-run-malicious-code.json`.
+
+### Query patterns
+1. **Process chain (the crux):** `DeviceProcessEvents` on `<HOST>` for 3d where `FileName`/`InitiatingProcessFileName`
+   is the LOLBin or the command line `has "<SCRIPT_NAME_TOKEN>"`. Project the parent, command line and SHA256.
+   Read the LOLBin args: `certutil -decode <tmp>.b64 <tmp>.ps1` is a local unpack, while `-urlcache -f http…` is a real download.
+2. **Disconfirming test:** `DeviceNetworkEvents` from the LOLBin and from `powershell.exe` whose command line has the decoded
+   script name. Validate the zero with the host's total network row count.
+3. **Script provenance:** `DeviceFileEvents` (30d) for `.bat/.ps1/.cmd` in the script folder: `FileOriginUrl`, iteration/renames.
+4. **Children of the decoded script:** `DeviceProcessEvents` where `InitiatingProcessCommandLine has "<SCRIPT_NAME_TOKEN>"`.
+
+### Traps
+- The ticket's entity list has the cmd.exe line but **not** the certutil args. Always pull the certutil command line before judging.
+- A user-built tool refires on every run (CLTA-39895: 5 runs in 2h folded into one alert, plus 3 prior incidents).
+  Check sibling incidents' classifications for consistency.
+
+## Detection family — "Stopping multiple processes using taskkill" (Sentinel rule, T1562)
+
+Sentinel scheduled rule over `DeviceProcessEvents`: 10+ processes stopped with `taskkill.exe` on one device.
+The alert entity is only the host. Full playbook: IIRR `endpoint/stopping-multiple-processes-using-taskkill.json`.
+
+### Query patterns
+1. **Command lines by initiator (the crux):** `DeviceProcessEvents` on `<HOST>` for 3d where `FileName =~ "taskkill.exe"`. Summarize
+   `make_set(ProcessCommandLine)` by `AccountName, InitiatingProcessFileName, InitiatingProcessParentFileName, bin(TimeGenerated,1h)`.
+2. **Disconfirming test — resolve every `/PID` to what it was:** `DeviceProcessEvents` where `ProcessId in (<PID_LIST>)` with the
+   window bounded at the burst time. Use `arg_max(TimeGenerated, FileName, FolderPath, InitiatingProcessFileName)` by ProcessId, because PIDs are reused.
+   All children of the initiating app means self-cleanup. Any AV/EDR/backup/DB/VSS service means escalate.
+3. **Initiator genuine and just updated?** `DeviceProcessEvents` for the initiating exe (7d), summarize by `FolderPath`,
+   `ProcessVersionInfoCompanyName`, `SHA256` with First/Last. Get the signer from `DeviceFileCertificateInfo` joined on SHA1.
+   A new versioned FolderPath first seen at the burst time means an auto-update restart.
+
+### Traps
+- Electron/CLI `InitiatingProcessCommandLine` can be several KB (the Claude app passes the whole MCP/tool config). Don't
+  group by it untruncated; the output balloons.
+- `make_set` of command lines printed via Python `ast` iterates characters if a row is a JSON string. Parse with `json.loads`.
